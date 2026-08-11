@@ -500,14 +500,31 @@ async function initUI() {
     window.workspaceManager = new WorkspaceManager({
         slots: [
             {id: "terminal", label: "TERMINAL"},
-            {id: "code", label: "CODE", placeholder: true},
-            {id: "browser", label: "BROWSER", placeholder: true},
+            {id: "code", label: "CODE"},
+            {id: "browser", label: "BROWSER"},
             {id: "notes", label: "NOTES", placeholder: true},
             {id: "add", label: "+", available: false, placeholder: true, empty: true}
         ]
     });
     document.querySelectorAll("[data-workspace-slot]").forEach(element => {
-        element.addEventListener("click", () => window.workspaceManager.focus(element.dataset.workspaceSlot));
+        element.addEventListener("click", event => {
+            if (event.target.closest(".workspace_control")) return;
+            window.workspaceManager.focus(element.dataset.workspaceSlot);
+        });
+    });
+    ["code", "browser"].forEach(id => {
+        const controls = document.createElement("span");
+        controls.className = "workspace_controls";
+        controls.innerHTML = `<button class="workspace_control" data-action="minimize" title="Minimize">_</button><button class="workspace_control" data-action="fullscreen" title="Fullscreen">[]</button><button class="workspace_control" data-action="close" title="Close">X</button>`;
+        controls.addEventListener("click", event => {
+            const action = event.target.dataset.action;
+            if (!action) return;
+            event.stopPropagation();
+            const slot = window.workspaceManager.getSlot(id);
+            if (action === "fullscreen") window.workspaceManager.fullscreen(id, !slot.fullscreen);
+            else window.workspaceManager[action](id);
+        });
+        document.querySelector(`#workspace_slot_${id} p`).appendChild(controls);
     });
     window.workspaceManager.subscribe(state => {
         state.slots.forEach(slot => {
@@ -519,12 +536,19 @@ async function initUI() {
                 slot.placeholder ? "placeholder" : ""
             ].filter(Boolean).join(" ");
             viewElement.classList.toggle("active", slot.active);
+            if (slot.status && slot.id !== "terminal") viewElement.textContent = slot.status;
         });
         if (state.activeSlotId === "terminal" && window.term && window.term[0]) {
             window.term[0].fit();
             window.term[0].term.focus();
         }
     });
+    window.i3WorkspaceClient = new I3WorkspaceClient({
+        ipc,
+        manager: window.workspaceManager,
+        viewport: document.getElementById("workspace_viewport")
+    });
+    window.i3WorkspaceClient.initialize();
     window.term = {
         0: new Terminal({
             role: "client",

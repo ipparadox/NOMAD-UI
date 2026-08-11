@@ -10,7 +10,9 @@ class WorkspaceManager {
             active: index === 0,
             inactive: index !== 0,
             minimized: false,
-            fullscreen: false
+            fullscreen: false,
+            running: slot.id === "terminal",
+            status: slot.status || ""
         }));
         this.activeSlotId = this.slots.length ? this.slots[0].id : null;
         this.listeners = [];
@@ -44,22 +46,15 @@ class WorkspaceManager {
     launch(id) {
         const slot = this.getSlot(id);
         if (!slot || !slot.available || slot.placeholder || !this._runOperation("launch", slot)) return false;
-        return this.focus(id);
+        return this._activate(slot, "launch");
     }
 
     focus(id) {
         const slot = this.getSlot(id);
         if (!slot) return false;
-        if (!slot.placeholder && !this._runOperation("focus", slot)) return false;
+        if (!this._runOperation("focus", slot)) return false;
 
-        this.slots.forEach(item => {
-            item.active = item.id === id;
-            item.inactive = item.id !== id;
-        });
-        slot.minimized = false;
-        this.activeSlotId = id;
-        this._emit("focus", slot);
-        return true;
+        return this._activate(slot, "focus");
     }
 
     minimize(id) {
@@ -76,8 +71,7 @@ class WorkspaceManager {
     restore(id) {
         const slot = this.getSlot(id);
         if (!slot || slot.placeholder || !this._runOperation("restore", slot)) return false;
-        slot.minimized = false;
-        return this.focus(id);
+        return this._activate(slot, "restore");
     }
 
     fullscreen(id, enabled = true) {
@@ -93,11 +87,32 @@ class WorkspaceManager {
         if (!slot || slot.id === "terminal" || slot.placeholder || !this._runOperation("close", slot)) return false;
         slot.active = false;
         slot.inactive = true;
-        slot.available = false;
+        slot.running = false;
         slot.minimized = false;
         slot.fullscreen = false;
         if (this.activeSlotId === id) this.activeSlotId = null;
         this._emit("close", slot);
+        return true;
+    }
+
+    update(id, changes = {}) {
+        const slot = this.getSlot(id);
+        if (!slot) return false;
+        ["available", "minimized", "fullscreen", "running", "status"].forEach(key => {
+            if (Object.prototype.hasOwnProperty.call(changes, key)) slot[key] = changes[key];
+        });
+        this._emit("update", slot);
+        return true;
+    }
+
+    _activate(slot, operation) {
+        this.slots.forEach(item => {
+            item.active = item.id === slot.id;
+            item.inactive = item.id !== slot.id;
+        });
+        slot.minimized = false;
+        this.activeSlotId = slot.id;
+        this._emit(operation, slot);
         return true;
     }
 

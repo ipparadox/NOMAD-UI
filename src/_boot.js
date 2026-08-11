@@ -37,12 +37,13 @@ const url = require("url");
 const fs = require("fs");
 const which = require("which");
 const Terminal = require("./classes/terminal.class.js").Terminal;
+const I3WindowManager = require("./classes/i3WindowManager.class.js").I3WindowManager;
 
 ipc.on("log", (e, type, content) => {
     signale[type](content);
 });
 
-var win, tty, extraTtys;
+var win, tty, extraTtys, i3WindowManager;
 const settingsFile = path.join(electron.app.getPath("userData"), "settings.json");
 const shortcutsFile = path.join(electron.app.getPath("userData"), "shortcuts.json");
 const lastWindowStateFile = path.join(electron.app.getPath("userData"), "lastWindowState.json");
@@ -213,6 +214,10 @@ function createWindow(settings) {
 
     signale.complete("Frontend window created!");
     win.show();
+    win.on("move", () => win.webContents.send("window-manager-geometry-changed"));
+    electron.screen.on("display-metrics-changed", () => {
+        if (win && !win.isDestroyed()) win.webContents.send("window-manager-geometry-changed");
+    });
     if (!settings.allowWindowed) {
         win.setResizable(false);
     } else if (!require(lastWindowStateFile)["useFullscreen"]) {
@@ -274,6 +279,24 @@ app.on('ready', async () => {
     require("./_multithread.js");
 
     createWindow(settings);
+
+    i3WindowManager = new I3WindowManager({
+        log: (level, message) => signale[level](message),
+        onState: state => {
+            if (win && !win.isDestroyed()) win.webContents.send("window-manager-state", state);
+        }
+    });
+    await i3WindowManager.initialize();
+    ipc.on("window-manager-operation", async (event, request) => {
+        if (!request || typeof request.operation !== "string") return;
+        let result;
+        if (request.operation === "availability") {
+            result = i3WindowManager.available ? {ok: true, appId: "terminal", status: "RUNNING"} : {ok: false, appId: "terminal", status: "WINDOW MANAGER UNAVAILABLE"};
+        } else {
+            result = await i3WindowManager.operate(request.operation, request.appId, request.geometry);
+        }
+        if (!event.sender.isDestroyed()) event.sender.send("window-manager-state", Object.assign({requestId: request.requestId}, result));
+    });
 
     // Support for more terminals, used for creating tabs (currently limited to 4 extra terms)
     extraTtys = {};
@@ -367,6 +390,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+    if (i3WindowManager) i3WindowManager.destroy();
     tty.close();
     Object.keys(extraTtys).forEach(key => {
         if (extraTtys[key] !== null) {

@@ -29,6 +29,29 @@ ul#workspace_slots > li > p {
     transform: skewX(-35deg);
 }
 
+.workspace_controls {
+    display: inline-flex;
+    gap: 0.32vw;
+    margin-left: 0.55vw;
+    vertical-align: 0.05vh;
+}
+
+button.workspace_control {
+    border: 0;
+    border-left: 0.092vh solid currentColor;
+    padding: 0 0 0 0.28vw;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 0.78em;
+    line-height: 1;
+    cursor: pointer;
+}
+
+li:not(.active) .workspace_controls {
+    display: none;
+}
+
 ul#workspace_slots > li:not(:first-child) {
     border-left: 0.18vh solid rgba(var(--color_r), var(--color_g), var(--color_b), 0.5);
 }
