@@ -50,6 +50,8 @@ const lastWindowStateFile = path.join(settingsDir, "lastWindowState.json");
 
 // Load config
 window.settings = require(settingsFile);
+// Settings files created before NOMAD-UI V0.1-A keep the original keyboard.
+window.settings.virtualKeyboard = (window.settings.virtualKeyboard !== false);
 window.shortcuts = require(shortcutsFile);
 window.lastWindowState = require(lastWindowStateFile);
 
@@ -342,6 +344,8 @@ async function getDisplayName() {
 
 // Create the UI's html structure and initialize the terminal client and the keyboard
 async function initUI() {
+    document.body.classList.toggle("no-virtual-keyboard", !window.settings.virtualKeyboard);
+
     document.body.innerHTML += `<section class="mod_column" id="mod_column_left">
         <h3 class="title"><p>PANEL</p><p>SYSTEM</p></h3>
     </section>
@@ -367,7 +371,7 @@ async function initUI() {
 
     document.getElementById("main_shell").setAttribute("style", "opacity: 0;");
     document.body.innerHTML += `
-    <section id="filesystem" style="width: 0px;" class="${window.settings.hideDotfiles ? "hideDotfiles" : ""} ${window.settings.fsListView ? "list-view" : ""}">
+    <section id="repository" style="width: 0px; opacity: 0;">
     </section>
     <section id="keyboard" style="opacity:0;">
     </section>`;
@@ -394,14 +398,18 @@ async function initUI() {
 
     greeter.setAttribute("style", "opacity: 1;");
 
-    document.getElementById("filesystem").setAttribute("style", "");
-    document.getElementById("keyboard").setAttribute("style", "");
-    document.getElementById("keyboard").setAttribute("class", "animation_state_1");
-    window.audioManager.keyboard.play();
+    document.getElementById("repository").setAttribute("style", "");
+    if (window.settings.virtualKeyboard) {
+        document.getElementById("keyboard").setAttribute("style", "");
+        document.getElementById("keyboard").setAttribute("class", "animation_state_1");
+        window.audioManager.keyboard.play();
+    }
 
     await _delay(100);
 
-    document.getElementById("keyboard").setAttribute("class", "animation_state_1 animation_state_2");
+    if (window.settings.virtualKeyboard) {
+        document.getElementById("keyboard").setAttribute("class", "animation_state_1 animation_state_2");
+    }
 
     await _delay(1000);
 
@@ -491,13 +499,17 @@ async function initUI() {
 
     await _delay(100);
 
-    window.fsDisp = new FilesystemDisplay({
-        parentId: "filesystem"
-    });
+    const repositoryNames = ["AI", "UNIVERSITY", "NETWORKING", "TOOLS", "PROJECTS"];
+    const folderIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.9994 3.9981h-6c-1.105 0-1.99.896-1.99 2l-.01 12c0 1.104.895 2 2 2h16c1.104 0 2-.896 2-2V7.9981c0-1.104-.896-2-2-2h-8l-1.9996-2z"/></svg>`;
+    document.getElementById("repository").innerHTML = `
+        <h3 class="title"><p>REPOSITORIES</p><p>LAUNCHER</p></h3>
+        <div id="repository_container">
+            ${repositoryNames.map(name => `<div class="repository_entry" title="${name}">${folderIcon}<h3>${name}</h3></div>`).join("")}
+        </div>`;
 
     await _delay(200);
 
-    document.getElementById("filesystem").setAttribute("style", "opacity: 1;");
+    document.getElementById("repository").setAttribute("style", "opacity: 1;");
 
     // Resend terminal CWD to fsDisp if we're hot reloading
     if (window.performance.navigation.type === 1) {
@@ -545,7 +557,7 @@ window.focusShellTab = number => {
         window.term[number].term.focus();
         window.term[number].resendCWD();
 
-        window.fsDisp.followTab();
+        if (window.fsDisp) window.fsDisp.followTab();
     } else if (number > 0 && number <= 4 && window.term[number] !== null && typeof window.term[number] !== "object") {
         window.term[number] = null;
 
@@ -654,6 +666,14 @@ window.openSettings = async () => {
                         <td><select id="settingsEditor-keyboard">
                             <option>${window.settings.keyboard}</option>
                             ${keyboards}
+                        </select></td>
+                    </tr>
+                    <tr>
+                        <td>virtualKeyboard</td>
+                        <td>Show the on-screen keyboard</td>
+                        <td><select id="settingsEditor-virtualKeyboard">
+                            <option>${window.settings.virtualKeyboard}</option>
+                            <option>${!window.settings.virtualKeyboard}</option>
                         </select></td>
                     </tr>
                     <tr>
@@ -827,6 +847,7 @@ window.writeSettingsFile = () => {
         env: document.getElementById("settingsEditor-env").value,
         username: document.getElementById("settingsEditor-username").value,
         keyboard: document.getElementById("settingsEditor-keyboard").value,
+        virtualKeyboard: (document.getElementById("settingsEditor-virtualKeyboard").value === "true"),
         theme: document.getElementById("settingsEditor-theme").value,
         termFontSize: Number(document.getElementById("settingsEditor-termFontSize").value),
         audio: (document.getElementById("settingsEditor-audio").value === "true"),
@@ -855,6 +876,7 @@ window.writeSettingsFile = () => {
         }
     });
 
+    document.body.classList.toggle("no-virtual-keyboard", !window.settings.virtualKeyboard);
     fs.writeFileSync(settingsFile, JSON.stringify(window.settings, "", 4));
     document.getElementById("settingsEditorStatus").innerText = "New values written to settings.json file at "+new Date().toTimeString();
 };
@@ -1023,10 +1045,10 @@ window.useAppShortcut = action => {
             window.activeFuzzyFinder = new FuzzyFinder();
             return true;
         case "FS_LIST_VIEW":
-            window.fsDisp.toggleListview();
+            if (window.fsDisp) window.fsDisp.toggleListview();
             return true;
         case "FS_DOTFILES":
-            window.fsDisp.toggleHidedotfiles();
+            if (window.fsDisp) window.fsDisp.toggleHidedotfiles();
             return true;
         case "KB_PASSMODE":
             window.keyboard.togglePasswordMode();

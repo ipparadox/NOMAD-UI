@@ -77,6 +77,7 @@ if (!fs.existsSync(settingsFile)) {
         shellArgs: '',
         cwd: electron.app.getPath("userData"),
         keyboard: "en-US",
+        virtualKeyboard: true,
         theme: "tron",
         termFontSize: 15,
         audio: true,
