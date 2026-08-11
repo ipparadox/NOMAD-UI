@@ -352,7 +352,7 @@ async function initUI() {
         <h3 class="title"><p>PANEL</p><p>SYSTEM</p></h3>
     </section>
     <section id="main_shell" style="height:0%;width:0%;opacity:0;margin-bottom:30vh;" augmented-ui="bl-clip tr-clip exe">
-        <h3 class="title" style="opacity:0;"><p>TERMINAL</p><p>MAIN SHELL</p></h3>
+        <h3 class="title" style="opacity:0;"><p>WORKSPACE</p><p>APPLICATIONS</p></h3>
         <h1 id="main_shell_greeting"></h1>
     </section>
     <section class="mod_column" id="mod_column_right">
@@ -468,20 +468,63 @@ async function initUI() {
     // Initialize the terminal
     let shellContainer = document.getElementById("main_shell");
     shellContainer.innerHTML += `
-        <ul id="main_shell_tabs">
-            <li id="shell_tab0" onclick="window.focusShellTab(0);" class="active"><p>MAIN SHELL</p></li>
-            <li id="shell_tab1" onclick="window.focusShellTab(1);"><p>EMPTY</p></li>
-            <li id="shell_tab2" onclick="window.focusShellTab(2);"><p>EMPTY</p></li>
-            <li id="shell_tab3" onclick="window.focusShellTab(3);"><p>EMPTY</p></li>
-            <li id="shell_tab4" onclick="window.focusShellTab(4);"><p>EMPTY</p></li>
+        <ul id="workspace_slots" aria-label="Workspace applications">
+            <li id="workspace_slot_terminal" data-workspace-slot="terminal"><p>TERMINAL</p></li>
+            <li id="workspace_slot_code" data-workspace-slot="code"><p>CODE</p></li>
+            <li id="workspace_slot_browser" data-workspace-slot="browser"><p>BROWSER</p></li>
+            <li id="workspace_slot_notes" data-workspace-slot="notes"><p>NOTES</p></li>
+            <li id="workspace_slot_add" data-workspace-slot="add"><p>+</p></li>
         </ul>
-        <div id="main_shell_innercontainer">
-            <pre id="terminal0" class="active"></pre>
-            <pre id="terminal1"></pre>
-            <pre id="terminal2"></pre>
-            <pre id="terminal3"></pre>
-            <pre id="terminal4"></pre>
+        <ul id="main_shell_tabs" aria-hidden="true">
+            <li id="shell_tab0" class="active"><p>MAIN SHELL</p></li>
+            <li id="shell_tab1"><p>EMPTY</p></li>
+            <li id="shell_tab2"><p>EMPTY</p></li>
+            <li id="shell_tab3"><p>EMPTY</p></li>
+            <li id="shell_tab4"><p>EMPTY</p></li>
+        </ul>
+        <div id="workspace_viewport">
+            <div id="workspace_view_terminal" class="workspace_view">
+                <div id="main_shell_innercontainer">
+                    <pre id="terminal0" class="active"></pre>
+                    <pre id="terminal1"></pre>
+                    <pre id="terminal2"></pre>
+                    <pre id="terminal3"></pre>
+                    <pre id="terminal4"></pre>
+                </div>
+            </div>
+            <div id="workspace_view_code" class="workspace_view workspace_empty_state">APPLICATION NOT INITIALIZED</div>
+            <div id="workspace_view_browser" class="workspace_view workspace_empty_state">APPLICATION NOT INITIALIZED</div>
+            <div id="workspace_view_notes" class="workspace_view workspace_empty_state">APPLICATION NOT INITIALIZED</div>
+            <div id="workspace_view_add" class="workspace_view workspace_empty_state">APPLICATION SLOT AVAILABLE</div>
         </div>`;
+    window.workspaceManager = new WorkspaceManager({
+        slots: [
+            {id: "terminal", label: "TERMINAL"},
+            {id: "code", label: "CODE", placeholder: true},
+            {id: "browser", label: "BROWSER", placeholder: true},
+            {id: "notes", label: "NOTES", placeholder: true},
+            {id: "add", label: "+", available: false, placeholder: true, empty: true}
+        ]
+    });
+    document.querySelectorAll("[data-workspace-slot]").forEach(element => {
+        element.addEventListener("click", () => window.workspaceManager.focus(element.dataset.workspaceSlot));
+    });
+    window.workspaceManager.subscribe(state => {
+        state.slots.forEach(slot => {
+            const slotElement = document.getElementById("workspace_slot_"+slot.id);
+            const viewElement = document.getElementById("workspace_view_"+slot.id);
+            slotElement.className = [
+                slot.active ? "active" : "inactive",
+                slot.available ? "available" : "unavailable",
+                slot.placeholder ? "placeholder" : ""
+            ].filter(Boolean).join(" ");
+            viewElement.classList.toggle("active", slot.active);
+        });
+        if (state.activeSlotId === "terminal" && window.term && window.term[0]) {
+            window.term[0].fit();
+            window.term[0].term.focus();
+        }
+    });
     window.term = {
         0: new Terminal({
             role: "client",
@@ -491,11 +534,13 @@ async function initUI() {
     };
     window.currentTerm = 0;
     window.term[0].onprocesschange = p => {
-        document.getElementById("shell_tab0").innerHTML = `<p>MAIN - ${p}</p>`;
+        document.getElementById("workspace_slot_terminal").title = `MAIN - ${p}`;
     };
     // Prevent losing hardware keyboard focus on the terminal when using touch keyboard
     window.onmouseup = e => {
-        if (window.keyboard.linkedToTerm) window.term[window.currentTerm].term.focus();
+        if (window.keyboard.linkedToTerm && window.workspaceManager.activeSlotId === "terminal") {
+            window.term[window.currentTerm].term.focus();
+        }
     };
     window.term[0].term.writeln("\033[1m"+`Welcome to eDEX-UI v${electron.remote.app.getVersion()} - Electron v${process.versions.electron}`+"\033[0m");
 
@@ -515,6 +560,7 @@ async function initUI() {
         repositoryRoot: window.settings.repositoryRoot,
         folderIcon,
         onselect: repositoryPath => {
+            window.workspaceManager.focus("terminal");
             window.focusShellTab(0);
             window.term[0].writelr(RepositoryLauncher.terminalCommand(repositoryPath, window.settings.shell));
             window.term[0].term.focus();
@@ -554,6 +600,10 @@ window.remakeKeyboard = layout => {
 
 window.focusShellTab = number => {
     window.audioManager.folder.play();
+
+    if (number === 0 && window.workspaceManager && window.workspaceManager.activeSlotId !== "terminal") {
+        window.workspaceManager.focus("terminal");
+    }
 
     if (number !== window.currentTerm && window.term[number]) {
         window.currentTerm = number;

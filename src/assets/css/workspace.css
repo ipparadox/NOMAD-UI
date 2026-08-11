@@ -1,0 +1,91 @@
+ul#workspace_slots {
+    margin: -0.70vh 0 0 -0.74vh;
+    padding: 0;
+    width: calc(100% + 1.48vh);
+    display: flex;
+    box-sizing: border-box;
+    border-bottom: 0.18vh solid rgba(var(--color_r), var(--color_g), var(--color_b), 0.5);
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: space-evenly;
+    overflow: hidden;
+}
+
+ul#workspace_slots > li {
+    cursor: pointer;
+    display: block;
+    font-family: var(--font_main);
+    font-weight: normal;
+    width: 100%;
+    padding: 0.7vh 0 0.4vh;
+    text-align: center;
+    box-sizing: border-box;
+    background: var(--color_light_black);
+    transform: skewX(35deg);
+}
+
+ul#workspace_slots > li > p {
+    margin: 0;
+    transform: skewX(-35deg);
+}
+
+ul#workspace_slots > li:not(:first-child) {
+    border-left: 0.18vh solid rgba(var(--color_r), var(--color_g), var(--color_b), 0.5);
+}
+
+ul#workspace_slots > li.active {
+    background: rgb(var(--color_r), var(--color_g), var(--color_b));
+    color: var(--color_light_black);
+    font-weight: bold;
+    transform: skewX(35deg) scale(1.2);
+}
+
+ul#workspace_slots > li.placeholder:not(.active) {
+    color: rgba(var(--color_r), var(--color_g), var(--color_b), 0.62);
+}
+
+ul#workspace_slots > li.unavailable {
+    color: rgba(var(--color_r), var(--color_g), var(--color_b), 0.35);
+}
+
+div#workspace_viewport {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    overflow: hidden;
+}
+
+div.workspace_view {
+    position: absolute;
+    inset: 0;
+    visibility: hidden;
+    opacity: 0;
+}
+
+div.workspace_view.active {
+    visibility: visible;
+    opacity: 1;
+}
+
+div.workspace_empty_state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font_main_light);
+    font-size: 1.15vh;
+    letter-spacing: 0.22em;
+    color: rgba(var(--color_r), var(--color_g), var(--color_b), 0.42);
+}
+
+div.workspace_empty_state::before,
+div.workspace_empty_state::after {
+    content: "";
+    width: 4vw;
+    margin: 0 1.2vw;
+    border-top: 0.092vh solid rgba(var(--color_r), var(--color_g), var(--color_b), 0.24);
+}
+
+ul#main_shell_tabs {
+    display: none;
+}
