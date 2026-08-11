@@ -78,6 +78,7 @@ if (!fs.existsSync(settingsFile)) {
         cwd: electron.app.getPath("userData"),
         keyboard: "en-US",
         virtualKeyboard: true,
+        repositoryRoot: "~/Repositories",
         theme: "tron",
         termFontSize: 15,
         audio: true,

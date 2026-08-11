@@ -52,6 +52,8 @@ const lastWindowStateFile = path.join(settingsDir, "lastWindowState.json");
 window.settings = require(settingsFile);
 // Settings files created before NOMAD-UI V0.1-A keep the original keyboard.
 window.settings.virtualKeyboard = (window.settings.virtualKeyboard !== false);
+// Settings files created before NOMAD-UI V0.1-B use the conventional repository directory.
+window.settings.repositoryRoot = window.settings.repositoryRoot || "~/Repositories";
 window.shortcuts = require(shortcutsFile);
 window.lastWindowState = require(lastWindowStateFile);
 
@@ -499,13 +501,26 @@ async function initUI() {
 
     await _delay(100);
 
-    const repositoryNames = ["AI", "UNIVERSITY", "NETWORKING", "TOOLS", "PROJECTS"];
-    const folderIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.9994 3.9981h-6c-1.105 0-1.99.896-1.99 2l-.01 12c0 1.104.895 2 2 2h16c1.104 0 2-.896 2-2V7.9981c0-1.104-.896-2-2-2h-8l-1.9996-2z"/></svg>`;
     document.getElementById("repository").innerHTML = `
         <h3 class="title"><p>REPOSITORIES</p><p>LAUNCHER</p></h3>
-        <div id="repository_container">
-            ${repositoryNames.map(name => `<div class="repository_entry" title="${name}">${folderIcon}<h3>${name}</h3></div>`).join("")}
-        </div>`;
+        <div id="repository_container"></div>`;
+    const folderIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    folderIcon.setAttribute("viewBox", "0 0 24 24");
+    folderIcon.setAttribute("aria-hidden", "true");
+    const folderPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    folderPath.setAttribute("d", "M9.9994 3.9981h-6c-1.105 0-1.99.896-1.99 2l-.01 12c0 1.104.895 2 2 2h16c1.104 0 2-.896 2-2V7.9981c0-1.104-.896-2-2-2h-8l-1.9996-2z");
+    folderIcon.appendChild(folderPath);
+    window.repositoryLauncher = new RepositoryLauncher({
+        container: "repository_container",
+        repositoryRoot: window.settings.repositoryRoot,
+        folderIcon,
+        onselect: repositoryPath => {
+            window.focusShellTab(0);
+            window.term[0].writelr(RepositoryLauncher.terminalCommand(repositoryPath, window.settings.shell));
+            window.term[0].term.focus();
+        }
+    });
+    window.repositoryLauncher.render();
 
     await _delay(200);
 
@@ -675,6 +690,11 @@ window.openSettings = async () => {
                             <option>${window.settings.virtualKeyboard}</option>
                             <option>${!window.settings.virtualKeyboard}</option>
                         </select></td>
+                    </tr>
+                    <tr>
+                        <td>repositoryRoot</td>
+                        <td>Directory containing Git repositories</td>
+                        <td><input type="text" id="settingsEditor-repositoryRoot" value="${window._escapeHtml(window.settings.repositoryRoot)}"></td>
                     </tr>
                     <tr>
                         <td>theme</td>
@@ -848,6 +868,7 @@ window.writeSettingsFile = () => {
         username: document.getElementById("settingsEditor-username").value,
         keyboard: document.getElementById("settingsEditor-keyboard").value,
         virtualKeyboard: (document.getElementById("settingsEditor-virtualKeyboard").value === "true"),
+        repositoryRoot: document.getElementById("settingsEditor-repositoryRoot").value || "~/Repositories",
         theme: document.getElementById("settingsEditor-theme").value,
         termFontSize: Number(document.getElementById("settingsEditor-termFontSize").value),
         audio: (document.getElementById("settingsEditor-audio").value === "true"),

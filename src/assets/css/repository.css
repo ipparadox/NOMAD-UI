@@ -60,6 +60,17 @@ div.repository_entry > h3 {
     overflow: hidden;
 }
 
+div#repository_container > p.repository_status {
+    grid-column: 1 / -1;
+    align-self: center;
+    margin: 0;
+    color: rgba(var(--color_r), var(--color_g), var(--color_b), .55);
+    font-family: var(--font_mono);
+    font-size: 1.2vh;
+    letter-spacing: .18em;
+    text-align: center;
+}
+
 body.no-virtual-keyboard section#keyboard {
     display: none !important;
 }
