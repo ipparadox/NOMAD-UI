@@ -3,6 +3,7 @@ class I3WorkspaceClient {
         this.ipc = opts.ipc;
         this.manager = opts.manager;
         this.viewport = opts.viewport;
+        this.log = opts.log || (() => {});
         this.requestId = 0;
         this.activeExternalId = null;
         this._geometryTimer = null;
@@ -21,12 +22,15 @@ class I3WorkspaceClient {
             if (slot.id === "terminal" || slot.id === "notes") {
                 this.activeExternalId = null;
                 this._send("focusNomad", slot.id);
-            } else if (slot.id === "code" || slot.id === "browser") {
+            } else if (slot.type === "external") {
                 if (this.activeExternalId && this.activeExternalId !== slot.id) {
                     this._send("minimize", this.activeExternalId);
                 }
                 this.activeExternalId = slot.id;
-                this.manager.update(slot.id, {status: "LAUNCHING APPLICATION"});
+                this.manager.update(slot.id, {
+                    status: slot.running ? "RESTORING APPLICATION" : "LAUNCHING APPLICATION",
+                    state: slot.running ? slot.state : "LAUNCHING"
+                });
                 this._send(slot.running ? "focus" : "launch", slot.id, this.geometry());
             }
             return true;
@@ -78,22 +82,43 @@ class I3WorkspaceClient {
         if (!result || !result.appId) return;
         if (result.appId === "terminal") {
             if (result.status === "WINDOW MANAGER UNAVAILABLE") {
-                ["code", "browser"].forEach(id => this.manager.update(id, {status: result.status}));
+                Object.keys(this.manager.applications).forEach(id => {
+                    if (this.manager.applications[id].type === "external") this.manager.update(id, {status: result.status});
+                });
             }
             return;
         }
         const changes = {status: result.status || ""};
-        ["running", "minimized", "fullscreen"].forEach(key => {
-            if (typeof result[key] === "boolean") changes[key] = result[key];
+        ["running", "minimized", "fullscreen", "state"].forEach(key => {
+            if (Object.prototype.hasOwnProperty.call(result, key)) changes[key] = result[key];
         });
-        this.manager.update(result.appId, changes);
-        if (result.status === "MINIMIZED" || result.status === "CLOSED") {
+        const passiveStateForActiveSlot = changes.state === "RUNNING" || (result.observed && changes.state === "HIDDEN");
+        if (passiveStateForActiveSlot && this.manager.activeSlotId === result.appId) changes.state = "ACTIVE";
+        if (changes.state === "ACTIVE") {
+            const activeBefore = this.manager.activeSlotId;
+            this.manager.synchronize(result.appId, changes);
+            this.log("info", `${result.appId} synchronize(ACTIVE): activeSlotId=${activeBefore} -> ${this.manager.activeSlotId}`);
+            this.activeExternalId = result.appId;
+            if (result.observed && result.state === "ACTIVE") this._send("geometry", result.appId, this.geometry());
+        } else if (!this.manager.getSlot(result.appId) && result.running) {
+            this.manager.synchronize(result.appId, changes);
+        } else {
+            this.manager.update(result.appId, changes);
+        }
+        if (result.status === "CLOSED") this.manager.close(result.appId, {skipOperation: true});
+        if (!result.ok && result.state !== "RUNNING") {
+            this.manager.close(result.appId, {skipOperation: true});
+            this.manager.focus("terminal");
+        }
+        if (result.status === "CLOSED") {
             if (this.manager.activeSlotId === result.appId || this.manager.activeSlotId === null) {
                 this.manager.focus("terminal");
             }
         }
-        if (!result.ok || result.status === "CLOSED" || result.status === "MINIMIZED") {
+        if (!result.ok || result.status === "CLOSED" || result.status === "HIDDEN") {
             if (this.activeExternalId === result.appId) this.activeExternalId = null;
         }
     }
 }
+
+if (typeof module !== "undefined" && typeof window === "undefined") module.exports = {I3WorkspaceClient};

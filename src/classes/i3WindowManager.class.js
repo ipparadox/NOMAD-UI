@@ -1,16 +1,15 @@
 const {execFile, spawn} = require("child_process");
-
-const APPLICATIONS = Object.freeze({
-    code: Object.freeze({command: "code", args: [], instance: "code", className: "code"}),
-    browser: Object.freeze({command: "firefox", args: [], instance: "Navigator", className: "firefox_firefox"})
-});
+const {APPLICATION_TYPES, MANAGED_APPLICATIONS, applicationMap} = require("./managedApplications.js");
+const APPLICATIONS = Object.freeze(applicationMap(MANAGED_APPLICATIONS.filter(app => app.type === APPLICATION_TYPES.EXTERNAL)));
 
 class I3WindowManager {
     constructor(opts = {}) {
         this.log = opts.log || (() => {});
         this.onState = opts.onState || (() => {});
         this.windows = {};
+        this.windowStates = {};
         this.processes = {};
+        this.launches = {};
         this.launchErrors = {};
         this.available = false;
         this._monitor = null;
@@ -47,21 +46,21 @@ class I3WindowManager {
             if (!windowNode) return this._result(false, appId, "APPLICATION NOT RUNNING");
             if (operation === "minimize") {
                 await this._command(windowNode.id, "move scratchpad");
-                return this._result(true, appId, "MINIMIZED", {minimized: true, fullscreen: false});
+                this.windowStates[appId] = {focused: false, hidden: true, visible: false};
+                return this._result(true, appId, "HIDDEN", {state: "HIDDEN", minimized: true, fullscreen: false, containerId: windowNode.id});
             }
             if (operation === "fullscreen") {
                 await this._command(windowNode.id, "fullscreen enable, focus");
-                return this._result(true, appId, "FULLSCREEN", {fullscreen: true, minimized: false});
+                return this._result(true, appId, "RUNNING", {state: "RUNNING", fullscreen: true, minimized: false, containerId: windowNode.id});
             }
             if (operation === "unfullscreen") {
                 await this._command(windowNode.id, "fullscreen disable, floating enable");
                 await this._place(windowNode.id, geometry, true);
-                return this._result(true, appId, "RUNNING", {fullscreen: false, minimized: false});
+                return this._result(true, appId, "RUNNING", {state: "RUNNING", fullscreen: false, minimized: false, containerId: windowNode.id});
             }
             if (operation === "close") {
                 await this._command(windowNode.id, "kill");
-                delete this.windows[appId];
-                return this._result(true, appId, "CLOSED", {running: false, minimized: false, fullscreen: false});
+                return this._result(true, appId, "CLOSED", {state: "CLOSED", running: false, minimized: false, fullscreen: false, containerId: null});
             }
             if (operation === "geometry") {
                 await this._place(windowNode.id, geometry, false);
@@ -77,9 +76,14 @@ class I3WindowManager {
     async _show(appId, geometry) {
         let windowNode = await this._managedWindow(appId);
         if (!windowNode) {
-            const launched = this._launch(appId);
-            if (!launched) return this._result(false, appId, "APPLICATION NOT FOUND");
-            windowNode = await this._waitForWindow(appId, 12000);
+            if (!this.launches[appId]) {
+                this.launches[appId] = (async () => {
+                    const launched = this._launch(appId);
+                    if (!launched) return null;
+                    return this._waitForWindow(appId, 12000);
+                })().finally(() => delete this.launches[appId]);
+            }
+            windowNode = await this.launches[appId];
         }
         if (!windowNode) return this._result(false, appId, "APPLICATION FAILED TO START");
         this.windows[appId] = windowNode.id;
@@ -89,14 +93,15 @@ class I3WindowManager {
         }
         await this._command(windowNode.id, "fullscreen disable, floating enable, border pixel 0");
         await this._place(windowNode.id, geometry, true);
-        return this._result(true, appId, "RUNNING", {running: true, minimized: false, fullscreen: false});
+        this.windowStates[appId] = {focused: true, hidden: false, visible: true};
+        return this._result(true, appId, "RUNNING", {state: "RUNNING", running: true, minimized: false, fullscreen: false, containerId: windowNode.id});
     }
 
     _launch(appId) {
         const definition = APPLICATIONS[appId];
         try {
             delete this.launchErrors[appId];
-            const child = spawn(definition.command, definition.args, {detached: true, stdio: "ignore"});
+            const child = spawn(definition.executable, definition.args, {detached: true, stdio: "ignore"});
             this.processes[appId] = child;
             child.once("error", error => {
                 this.launchErrors[appId] = error;
@@ -141,7 +146,7 @@ class I3WindowManager {
 
     _matches(node, definition) {
         const props = node.window_properties || {};
-        return props.instance === definition.instance && props.class === definition.className;
+        return props.instance === definition.windowMatch.instance && props.class === definition.windowMatch.className;
     }
 
     _walk(node, predicate) {
@@ -152,6 +157,47 @@ class I3WindowManager {
             if (match) return match;
         }
         return null;
+    }
+
+    _walkContext(node, predicate, ancestors = []) {
+        if (predicate(node)) return {node, ancestors};
+        const children = (node.nodes || []).concat(node.floating_nodes || []);
+        for (let i = 0; i < children.length; i++) {
+            const match = this._walkContext(children[i], predicate, ancestors.concat(node));
+            if (match) return match;
+        }
+        return null;
+    }
+
+    _containsFocusedNode(node) {
+        if (!node) return false;
+        if (node.focused === true) return true;
+        const children = (node.nodes || []).concat(node.floating_nodes || []);
+        return children.some(child => this._containsFocusedNode(child));
+    }
+
+    _observeWindow(context) {
+        const lineage = context.ancestors.concat(context.node);
+        const workspace = lineage.slice().reverse().find(node => node.type === "workspace") || null;
+        const scratchpadContainer = lineage.slice().reverse().find(node => node.scratchpad_state && node.scratchpad_state !== "none") || null;
+        const hidden = workspace ? workspace.name === "__i3_scratch" : Boolean(scratchpadContainer);
+        const workspaceVisible = workspace
+            ? (typeof workspace.visible === "boolean" ? workspace.visible : this._containsFocusedNode(workspace))
+            : null;
+        const nodeVisible = Boolean(context.node.visible);
+        const descendantFocused = this._containsFocusedNode(context.node);
+        const focused = descendantFocused && !hidden;
+        const visible = focused || (!hidden && (workspaceVisible === null ? nodeVisible : workspaceVisible));
+        return {
+            hidden,
+            visible,
+            focused,
+            descendantFocused,
+            nodeVisible,
+            workspaceName: workspace ? workspace.name : "unknown",
+            workspaceVisible,
+            scratchpadState: scratchpadContainer ? scratchpadContainer.scratchpad_state : "none"
+        };
     }
 
     async _place(conId, geometry, focus) {
@@ -183,7 +229,8 @@ class I3WindowManager {
             }
             if (windowNodes.length) {
                 this.windows[appId] = windowNodes[0].id;
-                this.onState(this._result(true, appId, "MINIMIZED", {minimized: true, fullscreen: false}));
+                this.windowStates[appId] = {focused: false, hidden: true, visible: false};
+                this.onState(this._result(true, appId, "HIDDEN", {state: "HIDDEN", minimized: true, fullscreen: false, containerId: windowNodes[0].id}));
             } else {
                 this.log("info", `${appId} hide requested: no managed window found`);
             }
@@ -204,10 +251,41 @@ class I3WindowManager {
         if (!this.available) return;
         let tree;
         try { tree = await this._tree(); } catch (error) { return; }
-        Object.keys(this.windows).forEach(appId => {
-            if (!this._walk(tree, node => node.id === this.windows[appId])) {
+        Object.keys(APPLICATIONS).forEach(appId => {
+            const rememberedId = this.windows[appId];
+            const rememberedContext = rememberedId ? this._walkContext(tree, node => node.id === rememberedId) : null;
+            if (rememberedId && !rememberedContext) {
                 delete this.windows[appId];
-                this.onState(this._result(true, appId, "CLOSED", {running: false, minimized: false, fullscreen: false}));
+                delete this.windowStates[appId];
+                this.onState(this._result(true, appId, "CLOSED", {state: "CLOSED", running: false, minimized: false, fullscreen: false, containerId: null}));
+                return;
+            }
+            const context = rememberedContext || this._walkContext(tree, node => this._matches(node, APPLICATIONS[appId]));
+            if (!context) return;
+            const windowNode = context.node;
+            const observationState = this._observeWindow(context);
+            const {hidden, visible, focused, descendantFocused} = observationState;
+            const previousState = this.windowStates[appId];
+            this.windowStates[appId] = {focused, hidden, visible};
+            const lifecycle = focused ? "ACTIVE" : (visible ? "RUNNING" : "HIDDEN");
+            const changed = !previousState || focused !== previousState.focused || hidden !== previousState.hidden || visible !== previousState.visible;
+            const workspaceVisible = observationState.workspaceVisible === null ? "unknown" : observationState.workspaceVisible;
+            this.log("info", `${appId} tree scan: con_id=${windowNode.id} node.focused=${Boolean(windowNode.focused)} descendantFocused=${descendantFocused} node.visible=${observationState.nodeVisible} workspace=${observationState.workspaceName} workspace.visible=${workspaceVisible} scratchpad_state=${observationState.scratchpadState} visible=${visible} discovered=${!rememberedId} lifecycle=${changed ? lifecycle : "none"}`);
+            if (!rememberedId || changed) {
+                this.windows[appId] = windowNode.id;
+                const observation = this._result(true, appId, visible ? "RUNNING" : "HIDDEN", {
+                    discovered: !rememberedId,
+                    observed: true,
+                    state: lifecycle,
+                    running: true,
+                    minimized: hidden,
+                    fullscreen: Boolean(windowNode.fullscreen_mode),
+                    visible,
+                    focused,
+                    containerId: windowNode.id
+                });
+                this.log("info", `${appId} lifecycle emitted: ${lifecycle} con_id=${windowNode.id}`);
+                this.onState(observation);
             }
         });
     }

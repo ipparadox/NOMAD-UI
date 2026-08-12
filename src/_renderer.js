@@ -351,7 +351,7 @@ async function initUI() {
     document.body.innerHTML += `<section class="mod_column" id="mod_column_left">
         <h3 class="title"><p>PANEL</p><p>SYSTEM</p></h3>
     </section>
-    <section id="main_shell" style="height:0%;width:0%;opacity:0;margin-bottom:30vh;" augmented-ui="bl-clip tr-clip exe">
+    <section id="main_shell" style="height:0%;width:0%;opacity:0;margin-bottom:30vh;" augmented-ui="tr-clip exe">
         <h3 class="title" style="opacity:0;"><p>WORKSPACE</p><p>APPLICATIONS</p></h3>
         <h1 id="main_shell_greeting"></h1>
     </section>
@@ -469,11 +469,7 @@ async function initUI() {
     let shellContainer = document.getElementById("main_shell");
     shellContainer.innerHTML += `
         <ul id="workspace_slots" aria-label="Workspace applications">
-            <li id="workspace_slot_terminal" data-workspace-slot="terminal"><p>TERMINAL</p></li>
-            <li id="workspace_slot_code" data-workspace-slot="code"><p>CODE</p></li>
-            <li id="workspace_slot_browser" data-workspace-slot="browser"><p>BROWSER</p></li>
-            <li id="workspace_slot_notes" data-workspace-slot="notes"><p>NOTES</p></li>
-            <li id="workspace_slot_add" data-workspace-slot="add"><p>+</p></li>
+            <li id="workspace_slot_add" class="workspace_add" aria-label="Add application"><p>+</p></li>
         </ul>
         <ul id="main_shell_tabs" aria-hidden="true">
             <li id="shell_tab0" class="active"><p>MAIN SHELL</p></li>
@@ -492,27 +488,25 @@ async function initUI() {
                     <pre id="terminal4"></pre>
                 </div>
             </div>
-            <div id="workspace_view_code" class="workspace_view workspace_empty_state">APPLICATION NOT INITIALIZED</div>
-            <div id="workspace_view_browser" class="workspace_view workspace_empty_state">APPLICATION NOT INITIALIZED</div>
             <div id="workspace_view_notes" class="workspace_view workspace_empty_state">APPLICATION NOT INITIALIZED</div>
-            <div id="workspace_view_add" class="workspace_view workspace_empty_state">APPLICATION SLOT AVAILABLE</div>
         </div>`;
     window.workspaceManager = new WorkspaceManager({
-        slots: [
-            {id: "terminal", label: "TERMINAL"},
-            {id: "code", label: "CODE"},
-            {id: "browser", label: "BROWSER"},
-            {id: "notes", label: "NOTES", placeholder: true},
-            {id: "add", label: "+", available: false, placeholder: true, empty: true}
-        ]
+        applications: MANAGED_APPLICATIONS,
+        initialApplicationIds: ["terminal"]
     });
-    document.querySelectorAll("[data-workspace-slot]").forEach(element => {
+    const workspaceSlots = document.getElementById("workspace_slots");
+    const addWorkspaceSlot = document.getElementById("workspace_slot_add");
+    const createWorkspaceSlot = slot => {
+        const element = document.createElement("li");
+        element.id = `workspace_slot_${slot.id}`;
+        element.dataset.workspaceSlot = slot.id;
+        const label = document.createElement("p");
+        label.textContent = slot.label;
+        element.appendChild(label);
         element.addEventListener("click", event => {
-            if (event.target.closest(".workspace_control")) return;
-            window.workspaceManager.focus(element.dataset.workspaceSlot);
+            if (!event.target.closest(".workspace_control")) window.workspaceManager.focus(slot.id);
         });
-    });
-    ["code", "browser"].forEach(id => {
+        if (slot.type !== "external") return element;
         const controls = document.createElement("span");
         controls.className = "workspace_controls";
         controls.innerHTML = `<button class="workspace_control" data-action="minimize" title="Minimize">_</button><button class="workspace_control" data-action="fullscreen" title="Fullscreen">[]</button><button class="workspace_control" data-action="close" title="Close">X</button>`;
@@ -520,23 +514,32 @@ async function initUI() {
             const action = event.target.dataset.action;
             if (!action) return;
             event.stopPropagation();
-            const slot = window.workspaceManager.getSlot(id);
-            if (action === "fullscreen") window.workspaceManager.fullscreen(id, !slot.fullscreen);
-            else window.workspaceManager[action](id);
+            const currentSlot = window.workspaceManager.getSlot(slot.id);
+            if (action === "fullscreen") window.workspaceManager.fullscreen(slot.id, !currentSlot.fullscreen);
+            else window.workspaceManager[action](slot.id);
         });
-        document.querySelector(`#workspace_slot_${id} p`).appendChild(controls);
-    });
+        label.appendChild(controls);
+        return element;
+    };
     window.workspaceManager.subscribe(state => {
+        const visibleIds = new Set(state.slots.map(slot => slot.id));
+        workspaceSlots.querySelectorAll("[data-workspace-slot]").forEach(element => {
+            if (!visibleIds.has(element.dataset.workspaceSlot)) element.remove();
+        });
         state.slots.forEach(slot => {
-            const slotElement = document.getElementById("workspace_slot_"+slot.id);
+            let slotElement = document.getElementById("workspace_slot_"+slot.id);
+            if (!slotElement) slotElement = createWorkspaceSlot(slot);
+            workspaceSlots.insertBefore(slotElement, addWorkspaceSlot);
             const viewElement = document.getElementById("workspace_view_"+slot.id);
             slotElement.className = [
                 slot.active ? "active" : "inactive",
                 slot.available ? "available" : "unavailable",
                 slot.placeholder ? "placeholder" : ""
             ].filter(Boolean).join(" ");
-            viewElement.classList.toggle("active", slot.active);
-            if (slot.status && slot.id !== "terminal") viewElement.textContent = slot.status;
+            if (viewElement) {
+                viewElement.classList.toggle("active", slot.active);
+                if (slot.status && slot.id !== "terminal") viewElement.textContent = slot.status;
+            }
         });
         if (state.activeSlotId === "terminal" && window.term && window.term[0]) {
             window.term[0].fit();
@@ -546,9 +549,11 @@ async function initUI() {
     window.i3WorkspaceClient = new I3WorkspaceClient({
         ipc,
         manager: window.workspaceManager,
-        viewport: document.getElementById("workspace_viewport")
+        viewport: document.getElementById("workspace_viewport"),
+        log: (level, message) => console[level](`[workspace] ${message}`)
     });
     window.i3WorkspaceClient.initialize();
+    window.openApplication = id => window.workspaceManager.focus(id);
     window.term = {
         0: new Terminal({
             role: "client",
