@@ -3,6 +3,16 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const {execFile} = require("child_process");
+const {
+    PROFILE_ID_PATTERN,
+    RepositoryRunError,
+    RepositoryRunProfileService
+} = require("./repositoryRunProfileService.js");
+const {
+    ACTIVE_STATES,
+    RepositoryProcessError,
+    RepositoryProcessManager
+} = require("./repositoryProcessManager.js");
 
 const REPOSITORY_ID_PATTERN = /^repo_[a-f0-9]{32}$/;
 const ACTION_ID_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
@@ -13,7 +23,9 @@ const REPOSITORY_ACTIONS = Object.freeze([
     Object.freeze({id: "code", label: "CODE"}),
     Object.freeze({id: "terminal", label: "TERMINAL"}),
     Object.freeze({id: "info", label: "INFO"}),
-    Object.freeze({id: "github", label: "GITHUB"})
+    Object.freeze({id: "github", label: "GITHUB"}),
+    Object.freeze({id: "run", label: "RUN"}),
+    Object.freeze({id: "stop", label: "STOP"})
 ]);
 
 class RepositoryError extends Error {
@@ -181,10 +193,12 @@ class RepositoryService {
         if (!this._validChildName(childName)) return null;
         const candidatePath = this.path.join(canonicalRoot, childName);
         let canonicalPath;
+        let repositoryStats;
         try {
             canonicalPath = this.fs.realpathSync(candidatePath);
             if (this.path.dirname(canonicalPath) !== canonicalRoot) return null;
-            if (!this.fs.statSync(canonicalPath).isDirectory()) return null;
+            repositoryStats = this.fs.statSync(canonicalPath);
+            if (!repositoryStats.isDirectory()) return null;
             const gitEntry = this.fs.lstatSync(this.path.join(canonicalPath, ".git"));
             if (!gitEntry.isDirectory() && !gitEntry.isFile()) return null;
         } catch (error) {
@@ -197,6 +211,15 @@ class RepositoryService {
             childName,
             canonicalPath,
             canonicalRoot,
+            directoryDevice: String(repositoryStats.dev),
+            directoryInode: String(repositoryStats.ino),
+            executionIdentity: this._identity([
+                canonicalRoot,
+                canonicalPath,
+                String(repositoryStats.dev),
+                String(repositoryStats.ino)
+            ]),
+            repositoryIdentity: null,
             public: null
         };
         record.public = await this._metadata(record);
@@ -206,13 +229,17 @@ class RepositoryService {
     async _verifyRecord(record) {
         let currentRoot;
         let canonicalPath;
+        let repositoryStats;
         try {
             currentRoot = this.fs.realpathSync(this.path.resolve(expandHome(this.repositoryRoot, this.home)));
             if (currentRoot !== record.canonicalRoot || currentRoot !== this.canonicalRoot) return null;
             const candidatePath = this.path.join(currentRoot, record.childName);
             canonicalPath = this.fs.realpathSync(candidatePath);
             if (canonicalPath !== record.canonicalPath || this.path.dirname(canonicalPath) !== currentRoot) return null;
-            if (!this.fs.statSync(canonicalPath).isDirectory()) return null;
+            repositoryStats = this.fs.statSync(canonicalPath);
+            if (!repositoryStats.isDirectory()) return null;
+            if (String(repositoryStats.dev) !== record.directoryDevice
+                || String(repositoryStats.ino) !== record.directoryInode) return null;
             const gitEntry = this.fs.lstatSync(this.path.join(canonicalPath, ".git"));
             if (!gitEntry.isDirectory() && !gitEntry.isFile()) return null;
         } catch (error) {
@@ -234,6 +261,12 @@ class RepositoryService {
         const detachedHeadPromise = this._git(record.canonicalPath, ["rev-parse", "--short", "HEAD"]);
         const remotesPromise = this._git(record.canonicalPath, ["remote"]);
         const originRemotePromise = this._git(record.canonicalPath, ["remote", "get-url", "origin"]);
+        const remoteIdentityPromise = this._git(
+            record.canonicalPath,
+            ["config", "--null", "--get-regexp", "^remote\\..*\\.url$"],
+            false,
+            {acceptExitCodeOne: true}
+        );
         const filterOverrides = await filterOverridesPromise;
         const statusPromise = filterOverrides === null
             ? Promise.resolve(null)
@@ -243,12 +276,17 @@ class RepositoryService {
                 false,
                 {configOverrides: filterOverrides}
             );
-        const [branchName, detachedHead, statusOutput, remotesOutput, originRemote] = await Promise.all([
+        const [branchName, detachedHead, statusOutput, remotesOutput, originRemote, remoteIdentity] = await Promise.all([
             branchPromise,
             detachedHeadPromise,
             statusPromise,
             remotesPromise,
-            originRemotePromise
+            originRemotePromise,
+            remoteIdentityPromise
+        ]);
+        record.repositoryIdentity = remoteIdentity === null ? null : this._identity([
+            record.executionIdentity,
+            remoteIdentity
         ]);
         const statusEntries = statusOutput === null ? null : this._statusEntryCount(statusOutput);
         const remotes = (remotesOutput || "").split(/\r?\n/).map(value => value.trim()).filter(Boolean);
@@ -284,6 +322,12 @@ class RepositoryService {
             if (status.includes("R") || status.includes("C")) index++;
         }
         return count;
+    }
+
+    _identity(parts) {
+        const digest = crypto.createHash("sha256");
+        parts.forEach(part => digest.update(String(part)).update("\0"));
+        return `sha256:${digest.digest("hex")}`;
     }
 
     async _filterOverrides(repositoryPath) {
@@ -364,11 +408,21 @@ class RepositoryActionService {
     constructor(opts = {}) {
         if (!opts.repositoryService) throw new TypeError("Repository actions require a RepositoryService");
         this.repositoryService = opts.repositoryService;
+        this.runProfileService = opts.runProfileService || new RepositoryRunProfileService({
+            home: this.repositoryService.home
+        });
+        this.processManager = opts.processManager || new RepositoryProcessManager({
+            home: this.repositoryService.home
+        });
         this.shell = opts.shell || "bash";
         this.writeTerminal = typeof opts.writeTerminal === "function" ? opts.writeTerminal : null;
         this.openCode = typeof opts.openCode === "function" ? opts.openCode : null;
         this.openBrowser = typeof opts.openBrowser === "function" ? opts.openBrowser : null;
         this.applicationAvailable = typeof opts.applicationAvailable === "function" ? opts.applicationAvailable : (() => true);
+        this.randomBytes = opts.randomBytes || crypto.randomBytes;
+        this.nowMilliseconds = opts.nowMilliseconds || Date.now;
+        this.authorizationTtlMs = Number.isSafeInteger(opts.authorizationTtlMs) ? opts.authorizationTtlMs : 5 * 60 * 1000;
+        this.pendingAuthorizations = new Map();
         this.actions = new Map();
         this.registerAction(REPOSITORY_ACTIONS[0], context => this._code(context), () => Boolean(this.openCode) && this.applicationAvailable("code"));
         this.registerAction(REPOSITORY_ACTIONS[1], context => this._terminal(context), () => Boolean(this.writeTerminal));
@@ -376,6 +430,8 @@ class RepositoryActionService {
         this.registerAction(REPOSITORY_ACTIONS[3], context => this._github(context), repository => (
             repository.public.remoteProvider === "GITHUB" && Boolean(this.openBrowser) && this.applicationAvailable("browser")
         ));
+        this.registerAction(REPOSITORY_ACTIONS[4], context => this._run(context), () => true);
+        this.registerAction(REPOSITORY_ACTIONS[5], context => this._stop(context), () => true);
     }
 
     registerAction(definition, handler, isAvailable = () => true) {
@@ -394,37 +450,84 @@ class RepositoryActionService {
 
     async list() {
         const result = await this.repositoryService.refresh();
+        const repositories = await Promise.all(result.repositories.map(repository => {
+            const internal = this.repositoryService.repositories.get(repository.id);
+            if (internal && this.processManager.isActive(repository.id)
+                && !this.processManager.matchesRepository(internal)) {
+                const snapshot = this.processManager.getRepositorySnapshot(repository.id);
+                return this._decorate(snapshot, null);
+            }
+            return this._decorate(repository, internal);
+        }));
+        const listedIds = new Set(repositories.map(repository => repository.id));
+        const missingActive = this.processManager.getActiveRepositorySnapshots()
+            .filter(repository => !listedIds.has(repository.id));
+        for (const repository of missingActive) repositories.push(await this._decorate(repository, null));
+        repositories.sort((left, right) => left.displayName.localeCompare(right.displayName, undefined, {sensitivity: "base"}));
         return {
             ok: true,
-            status: result.status,
-            repositories: result.repositories.map(repository => this._decorate(repository))
+            status: repositories.length ? null : result.status,
+            repositories
         };
     }
 
-    async execute(repositoryIdValue, actionId, geometry) {
+    async execute(repositoryIdValue, actionId, geometry, runRequest = {}) {
         const action = this.actions.get(actionId);
         if (!action) return {ok: false, status: "ACTION NOT FOUND"};
         try {
+            if (actionId === "stop") return await this._stop({repositoryId: repositoryIdValue});
             const repository = await this.repositoryService.resolveRepository(repositoryIdValue, {refreshMetadata: true});
+            if (actionId === "run") return await this._run({repository, runRequest});
             if (!action.isAvailable(repository)) return {ok: false, status: "ACTION UNAVAILABLE"};
             return await action.handler({repository, geometry});
         } catch (error) {
             return {
                 ok: false,
-                status: error instanceof RepositoryError ? error.status : "REPOSITORY ACTION FAILED"
+                status: error instanceof RepositoryError || error instanceof RepositoryRunError
+                    || error instanceof RepositoryProcessError
+                    ? error.status : "REPOSITORY ACTION FAILED"
             };
         }
     }
 
-    _decorate(repository) {
-        const internal = this.repositoryService.repositories.get(repository.id);
+    async _decorate(repository, internalRecord) {
+        const internal = typeof internalRecord === "undefined"
+            ? this.repositoryService.repositories.get(repository.id) : internalRecord;
         const publicRepository = Object.assign({}, repository);
         delete publicRepository.githubUrl;
-        publicRepository.actions = Array.from(this.actions.values()).map(action => ({
-            id: action.definition.id,
-            label: action.definition.label,
-            enabled: Boolean(internal && action.isAvailable(internal))
-        }));
+        publicRepository.repositoryAvailable = Boolean(internal);
+        const processStatus = this.processManager.getStatus(repository.id);
+        const processActive = Boolean(processStatus && ACTIVE_STATES.has(processStatus.state));
+        const runInspection = internal
+            ? this.runProfileService.inspect(internal)
+            : {candidates: [], trustStoreStatus: null};
+        publicRepository.process = processStatus;
+        publicRepository.actions = Array.from(this.actions.values()).map(action => {
+            let enabled;
+            let state = "";
+            if (action.definition.id === "run") {
+                enabled = !processActive && runInspection.candidates.length > 0;
+                if (processActive) state = processStatus.state;
+                else if (!runInspection.candidates.length) state = "NO PROFILE";
+                else if (runInspection.candidates.some(candidate => candidate.authorizationState !== "APPROVED")) {
+                    state = "AUTH REQUIRED";
+                } else if (processStatus && ["STOPPED", "FAILED"].includes(processStatus.state)) {
+                    state = processStatus.state;
+                }
+            } else if (action.definition.id === "stop") {
+                enabled = processActive && processStatus.state !== "STOPPING";
+                state = processActive ? processStatus.state : "UNAVAILABLE";
+            } else {
+                enabled = Boolean(internal && action.isAvailable(internal));
+                if (!enabled) state = "UNAVAILABLE";
+            }
+            return {
+                id: action.definition.id,
+                label: action.definition.label,
+                enabled,
+                state
+            };
+        });
         return publicRepository;
     }
 
@@ -457,8 +560,166 @@ class RepositoryActionService {
             ok: true,
             status: "REPOSITORY INFO",
             actionId: "info",
-            repository: this._decorate(this._publicRepository(context.repository))
+            repository: await this._decorate(this._publicRepository(context.repository), context.repository)
         };
+    }
+
+    async _run(context) {
+        const repository = context.repository;
+        const request = context.runRequest || {};
+        if (this.processManager.isActive(repository.id)) {
+            if (!this.processManager.matchesRepository(repository)) {
+                return {ok: false, status: "REPOSITORY IDENTITY CONFLICT"};
+            }
+            return {
+                ok: true,
+                status: this.processManager.getStatus(repository.id).state,
+                actionId: "run",
+                duplicate: true,
+                repository: await this._decorate(this._publicRepository(repository), repository)
+            };
+        }
+
+        const inspection = this.runProfileService.inspect(repository);
+        if (!inspection.candidates.length) return {ok: false, status: "NO SAFE RUN PROFILE DETECTED"};
+        let candidate = null;
+        if (request.profileId) {
+            candidate = inspection.candidates.find(profile => profile.profileId === request.profileId) || null;
+            if (!candidate) return {ok: false, status: "RUN PROFILE NOT FOUND"};
+        } else if (inspection.candidates.length === 1) {
+            candidate = inspection.candidates[0];
+        }
+
+        if (request.authorization) {
+            if (!candidate || !request.authorizationId) return {ok: false, status: "AUTHORIZATION REQUIRED"};
+            return this._authorizeAndRun(repository, candidate, inspection, request);
+        }
+        if (!candidate) {
+            return {
+                ok: true,
+                status: "RUN PROFILE SELECTION REQUIRED",
+                actionId: "run",
+                prompt: this._profileSelectionPrompt(repository, inspection.candidates)
+            };
+        }
+        if (candidate.authorizationState === "APPROVED") return this._launch(repository, candidate);
+        return {
+            ok: true,
+            status: candidate.authorizationState === "CHANGED"
+                ? "RUN PROFILE CHANGED\nAUTHORIZATION REQUIRED" : "AUTHORIZATION REQUIRED",
+            actionId: "run",
+            prompt: this._authorizationPrompt(repository, candidate, inspection)
+        };
+    }
+
+    async _authorizeAndRun(repository, candidate, inspection, request) {
+        this._pruneAuthorizations();
+        const pending = this.pendingAuthorizations.get(request.authorizationId);
+        this.pendingAuthorizations.delete(request.authorizationId);
+        if (!pending || pending.repositoryId !== repository.id || pending.profileId !== candidate.profileId
+            || pending.expiresAt < this.nowMilliseconds()) {
+            return {ok: false, status: "AUTHORIZATION REQUIRED"};
+        }
+        if (pending.executionIdentity !== repository.executionIdentity
+            || pending.repositoryIdentity !== repository.repositoryIdentity
+            || pending.profileFingerprint !== candidate.profileFingerprint) {
+            return {ok: false, status: "RUN PROFILE CHANGED\nAUTHORIZATION REQUIRED"};
+        }
+        if (request.authorization === "trust-profile") this.runProfileService.approve(repository, candidate);
+        else if (request.authorization !== "run-once") return {ok: false, status: "INVALID REQUEST"};
+        return this._launch(repository, candidate);
+    }
+
+    async _launch(repository, candidate) {
+        const result = this.processManager.start(repository, candidate);
+        return {
+            ok: result.ok,
+            status: result.status,
+            actionId: "run",
+            duplicate: result.duplicate === true,
+            repository: await this._decorate(this._publicRepository(repository), repository)
+        };
+    }
+
+    async _stop(context) {
+        const repositoryIdValue = context.repositoryId || (context.repository && context.repository.id);
+        const snapshot = this.processManager.getRepositorySnapshot(repositoryIdValue);
+        const result = await this.processManager.stop(repositoryIdValue);
+        if (!result.ok) return result;
+        const internal = this.repositoryService.repositories.get(repositoryIdValue) || null;
+        const publicRepository = internal ? this._publicRepository(internal) : snapshot;
+        return {
+            ok: true,
+            status: result.status,
+            actionId: "stop",
+            repository: publicRepository ? await this._decorate(publicRepository, internal) : null
+        };
+    }
+
+    _profileSelectionPrompt(repository, candidates) {
+        return {
+            kind: "profile-selection",
+            title: "RUN PROFILE",
+            repositoryName: repository.public.displayName,
+            fields: [],
+            warning: "",
+            choices: candidates.map(candidate => ({
+                id: candidate.profileId,
+                label: candidate.commandLabel,
+                enabled: true,
+                state: candidate.authorizationState === "APPROVED" ? "TRUSTED"
+                    : (candidate.authorizationState === "CHANGED" ? "CHANGED" : "")
+            })).concat([{id: "cancel", label: "CANCEL", enabled: true, state: ""}])
+        };
+    }
+
+    _authorizationPrompt(repository, candidate, inspection) {
+        const authorizationId = `auth_${this.randomBytes(24).toString("hex")}`;
+        this._pruneAuthorizations();
+        this.pendingAuthorizations.set(authorizationId, {
+            repositoryId: repository.id,
+            profileId: candidate.profileId,
+            executionIdentity: repository.executionIdentity,
+            repositoryIdentity: repository.repositoryIdentity,
+            profileFingerprint: candidate.profileFingerprint,
+            expiresAt: this.nowMilliseconds() + this.authorizationTtlMs
+        });
+        while (this.pendingAuthorizations.size > 128) {
+            this.pendingAuthorizations.delete(this.pendingAuthorizations.keys().next().value);
+        }
+        const trustEnabled = !inspection.trustStoreStatus && Boolean(repository.repositoryIdentity);
+        return {
+            kind: "authorization",
+            title: "REPOSITORY EXECUTION",
+            repositoryName: repository.public.displayName,
+            profileId: candidate.profileId,
+            authorizationId,
+            fields: [
+                {label: "PROFILE", value: candidate.displayName},
+                {label: "EXECUTABLE", value: candidate.executable},
+                {label: "ARGUMENTS", value: candidate.args.join(" ") || "NONE"}
+            ],
+            warning: candidate.authorizationState === "CHANGED"
+                ? "RUN PROFILE CHANGED\nAUTHORIZATION REQUIRED\nREPOSITORY CODE WILL EXECUTE"
+                : "REPOSITORY CODE WILL EXECUTE",
+            choices: [
+                {id: "run-once", label: "RUN ONCE", enabled: true, state: ""},
+                {
+                    id: "trust-profile",
+                    label: "TRUST PROFILE",
+                    enabled: trustEnabled,
+                    state: trustEnabled ? "" : (inspection.trustStoreStatus || "IDENTITY UNAVAILABLE")
+                },
+                {id: "cancel", label: "CANCEL", enabled: true, state: ""}
+            ]
+        };
+    }
+
+    _pruneAuthorizations() {
+        const now = this.nowMilliseconds();
+        this.pendingAuthorizations.forEach((authorization, id) => {
+            if (authorization.expiresAt < now) this.pendingAuthorizations.delete(id);
+        });
     }
 
     async _github(context) {
@@ -495,7 +756,11 @@ async function handleRepositoryRequest(actions, request) {
         return actions.list();
     }
     if (request.operation !== "action") return {ok: false, status: "UNSUPPORTED OPERATION"};
-    if (Object.keys(request).some(key => !["operation", "repositoryId", "actionId", "geometry"].includes(key))) {
+    const allowedKeys = [
+        "operation", "repositoryId", "actionId", "geometry",
+        "profileId", "authorizationId", "authorization"
+    ];
+    if (Object.keys(request).some(key => !allowedKeys.includes(key))) {
         return {ok: false, status: "INVALID REQUEST"};
     }
     const repositoryIdValue = normalizeRepositoryId(request.repositoryId);
@@ -505,7 +770,29 @@ async function handleRepositoryRequest(actions, request) {
     if ((requiresGeometry && !geometry) || (!requiresGeometry && typeof request.geometry !== "undefined") || (request.geometry && !geometry)) {
         return {ok: false, status: "INVALID REQUEST"};
     }
-    return actions.execute(repositoryIdValue, request.actionId, geometry);
+    const runKeysPresent = ["profileId", "authorizationId", "authorization"]
+        .some(key => Object.prototype.hasOwnProperty.call(request, key));
+    if (request.actionId !== "run" && runKeysPresent) return {ok: false, status: "INVALID REQUEST"};
+    const runRequest = {};
+    if (request.actionId === "run") {
+        if (typeof request.profileId !== "undefined") {
+            if (!PROFILE_ID_PATTERN.test(request.profileId || "")) return {ok: false, status: "INVALID REQUEST"};
+            runRequest.profileId = request.profileId;
+        }
+        if (typeof request.authorization !== "undefined") {
+            if (!["run-once", "trust-profile"].includes(request.authorization)
+                || !runRequest.profileId
+                || typeof request.authorizationId !== "string"
+                || !/^auth_[a-f0-9]{48}$/.test(request.authorizationId)) {
+                return {ok: false, status: "INVALID REQUEST"};
+            }
+            runRequest.authorization = request.authorization;
+            runRequest.authorizationId = request.authorizationId;
+        } else if (typeof request.authorizationId !== "undefined") {
+            return {ok: false, status: "INVALID REQUEST"};
+        }
+    }
+    return actions.execute(repositoryIdValue, request.actionId, geometry, runRequest);
 }
 
 module.exports = {

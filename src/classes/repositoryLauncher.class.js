@@ -15,8 +15,10 @@ class RepositoryLauncher {
         this.isOpen = false;
         this.selectedRepositoryId = null;
         this.selectedActionIndex = 0;
+        this.selectedChoiceIndex = 0;
         this.view = "actions";
         this.info = null;
+        this.prompt = null;
         this.errorMessage = "";
         this.busy = false;
         this.previousActiveId = null;
@@ -64,6 +66,8 @@ class RepositoryLauncher {
         this.selectedActionIndex = 0;
         this.view = "actions";
         this.info = null;
+        this.prompt = null;
+        this.selectedChoiceIndex = 0;
         this.errorMessage = "";
         this.busy = false;
         this.isOpen = true;
@@ -88,6 +92,8 @@ class RepositoryLauncher {
         this.selectedRepositoryId = null;
         this.view = "actions";
         this.info = null;
+        this.prompt = null;
+        this.selectedChoiceIndex = 0;
         this.errorMessage = "";
         this.busy = false;
         this.previousActiveId = null;
@@ -113,12 +119,18 @@ class RepositoryLauncher {
             return false;
         }
 
+        return this._invokeAction(repository, action, {});
+    }
+
+    async _invokeAction(repository, action, details) {
+        if (!this.isOpen || this.busy || !repository || !action) return false;
+
         this.busy = true;
         this.errorMessage = "";
         this._renderMenu();
         let result;
         try {
-            result = await this.onaction(repository.id, action.id);
+            result = await this.onaction(repository.id, action.id, details || {});
         } catch (error) {
             result = {ok: false, status: "REPOSITORY ACTION FAILED"};
         }
@@ -130,21 +142,52 @@ class RepositoryLauncher {
                 this.close({restoreFocus: false});
                 await this.refresh();
             } else {
+                if (this.view === "prompt") {
+                    this.view = "actions";
+                    this.prompt = null;
+                }
                 this._showError(status);
             }
             return false;
         }
 
+        let updatedRepository = null;
+        if (result.repository) {
+            updatedRepository = this._normalizeRepository(result.repository);
+            if (updatedRepository) {
+                const index = this.repositories.findIndex(item => item.id === updatedRepository.id);
+                if (index >= 0) this.repositories[index] = updatedRepository;
+            }
+        }
+
+        if (result.prompt) {
+            const prompt = this._normalizePrompt(result.prompt);
+            if (!prompt) {
+                this._showError("RUN PROMPT INVALID");
+                return false;
+            }
+            this.prompt = prompt;
+            this.selectedChoiceIndex = 0;
+            this.view = "prompt";
+            this._renderMenu();
+            return true;
+        }
+
         if (action.id === "info" && result.repository) {
-            const info = this._normalizeRepository(result.repository);
+            const info = updatedRepository;
             if (!info) {
                 this._showError("REPOSITORY INFO UNAVAILABLE");
                 return false;
             }
-            const index = this.repositories.findIndex(item => item.id === info.id);
-            if (index >= 0) this.repositories[index] = info;
             this.info = info;
             this.view = "info";
+            this._renderMenu();
+            return true;
+        }
+
+        if ((action.id === "run" || action.id === "stop") && updatedRepository) {
+            this.prompt = null;
+            this.view = "actions";
             this._renderMenu();
             return true;
         }
@@ -157,6 +200,30 @@ class RepositoryLauncher {
         const repository = this._selectedRepository();
         const action = repository && repository.actions[this.selectedActionIndex];
         return action ? this.activate(action.id) : Promise.resolve(false);
+    }
+
+    activateChoice() {
+        if (!this.isOpen || this.busy || this.view !== "prompt" || !this.prompt) return Promise.resolve(false);
+        const choice = this.prompt.choices[this.selectedChoiceIndex];
+        if (!choice || !choice.enabled) {
+            this._showError("ACTION UNAVAILABLE");
+            return Promise.resolve(false);
+        }
+        if (choice.id === "cancel") {
+            this.close();
+            return Promise.resolve(true);
+        }
+        const repository = this._selectedRepository();
+        const action = repository && repository.actions.find(item => item.id === "run");
+        if (!repository || !action) return Promise.resolve(false);
+        if (this.prompt.kind === "profile-selection") {
+            return this._invokeAction(repository, action, {profileId: choice.id});
+        }
+        return this._invokeAction(repository, action, {
+            profileId: this.prompt.profileId,
+            authorizationId: this.prompt.authorizationId,
+            authorization: choice.id
+        });
     }
 
     destroy() {
@@ -180,6 +247,8 @@ class RepositoryLauncher {
         this.actionListElement = this.document.createElement("ul");
         this.actionListElement.id = "repository_action_list";
         this.actionListElement.setAttribute("role", "listbox");
+        this.promptElement = this.document.createElement("div");
+        this.promptElement.className = "repository_action_summary repository_prompt_summary";
         this.infoElement = this.document.createElement("dl");
         this.infoElement.className = "repository_info";
         this.errorElement = this.document.createElement("p");
@@ -190,7 +259,15 @@ class RepositoryLauncher {
         this.footerElement = this.document.createElement("p");
         this.footerElement.className = "repository_action_help";
 
-        this.element.append(this.titleElement, this.actionListElement, this.infoElement, this.errorElement, this.summaryElement, this.footerElement);
+        this.element.append(
+            this.titleElement,
+            this.promptElement,
+            this.actionListElement,
+            this.infoElement,
+            this.errorElement,
+            this.summaryElement,
+            this.footerElement
+        );
         this.document.body.appendChild(this.element);
     }
 
@@ -202,9 +279,23 @@ class RepositoryLauncher {
             return {
                 id: action.id,
                 label: typeof action.label === "string" ? action.label.slice(0, 32) : action.id.toUpperCase(),
-                enabled: action.enabled === true
+                enabled: action.enabled === true,
+                state: typeof action.state === "string" ? action.state.slice(0, 64) : ""
             };
         }).filter(Boolean) : [];
+        let processState = null;
+        if (repository.process && typeof repository.process === "object" && !Array.isArray(repository.process)
+            && ["STARTING", "RUNNING", "STOPPING", "STOPPED", "FAILED"].includes(repository.process.state)) {
+            processState = {
+                profileId: typeof repository.process.profileId === "string" ? repository.process.profileId.slice(0, 64) : "UNKNOWN",
+                displayName: typeof repository.process.displayName === "string" ? repository.process.displayName.slice(0, 64) : "UNKNOWN",
+                state: repository.process.state,
+                startedAt: typeof repository.process.startedAt === "string" ? repository.process.startedAt.slice(0, 64) : null,
+                exitedAt: typeof repository.process.exitedAt === "string" ? repository.process.exitedAt.slice(0, 64) : null,
+                exitCode: Number.isInteger(repository.process.exitCode) ? repository.process.exitCode : null,
+                signal: typeof repository.process.signal === "string" ? repository.process.signal.slice(0, 32) : null
+            };
+        }
         return {
             id: repository.id,
             displayName: typeof repository.displayName === "string" ? repository.displayName.slice(0, 255) : "REPOSITORY",
@@ -215,8 +306,50 @@ class RepositoryLauncher {
             modifiedFileCount: Number.isSafeInteger(repository.modifiedFileCount) && repository.modifiedFileCount >= 0 ? repository.modifiedFileCount : 0,
             remoteAvailable: repository.remoteAvailable === true,
             remoteProvider: ["GITHUB", "OTHER", "NONE"].includes(repository.remoteProvider) ? repository.remoteProvider : "NONE",
+            repositoryAvailable: repository.repositoryAvailable !== false,
+            process: processState,
             actions
         };
+    }
+
+    _normalizePrompt(prompt) {
+        if (!prompt || typeof prompt !== "object" || Array.isArray(prompt)
+            || !["profile-selection", "authorization"].includes(prompt.kind)
+            || typeof prompt.title !== "string" || !Array.isArray(prompt.fields)
+            || !Array.isArray(prompt.choices) || !prompt.choices.length || prompt.choices.length > 16) return null;
+        const fields = prompt.fields.slice(0, 8).map(field => {
+            if (!field || typeof field !== "object" || Array.isArray(field)
+                || typeof field.label !== "string" || typeof field.value !== "string") return null;
+            return {label: field.label.slice(0, 32), value: field.value.slice(0, 512)};
+        }).filter(Boolean);
+        if (fields.length !== Math.min(prompt.fields.length, 8)) return null;
+        const choices = prompt.choices.map(choice => {
+            if (!choice || typeof choice !== "object" || Array.isArray(choice)
+                || typeof choice.id !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(choice.id)
+                || typeof choice.label !== "string") return null;
+            return {
+                id: choice.id,
+                label: choice.label.slice(0, 96),
+                enabled: choice.enabled === true,
+                state: typeof choice.state === "string" ? choice.state.slice(0, 64) : ""
+            };
+        }).filter(Boolean);
+        if (choices.length !== prompt.choices.length) return null;
+        const normalized = {
+            kind: prompt.kind,
+            title: prompt.title.slice(0, 64),
+            repositoryName: typeof prompt.repositoryName === "string" ? prompt.repositoryName.slice(0, 255) : "REPOSITORY",
+            fields,
+            warning: typeof prompt.warning === "string" ? prompt.warning.slice(0, 512) : "",
+            choices
+        };
+        if (prompt.kind === "authorization") {
+            if (typeof prompt.profileId !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(prompt.profileId)
+                || typeof prompt.authorizationId !== "string" || !/^auth_[a-f0-9]{48}$/.test(prompt.authorizationId)) return null;
+            normalized.profileId = prompt.profileId;
+            normalized.authorizationId = prompt.authorizationId;
+        }
+        return normalized;
     }
 
     _renderRepositories() {
@@ -266,49 +399,28 @@ class RepositoryLauncher {
             this.close({restoreFocus: false});
             return;
         }
-        this.titleElement.textContent = this.view === "info" ? "REPOSITORY INFO" : repository.displayName;
-        this.actionListElement.hidden = this.view !== "actions";
+        this.titleElement.textContent = this.view === "info" ? "REPOSITORY INFO"
+            : (this.view === "prompt" && this.prompt ? this.prompt.title : repository.displayName);
+        this.actionListElement.hidden = this.view === "info";
+        this.promptElement.hidden = this.view !== "prompt";
         this.infoElement.hidden = this.view !== "info";
         this.summaryElement.hidden = this.view !== "actions";
         this.footerElement.textContent = this.view === "info"
             ? "ESC CLOSE"
-            : "UP/DOWN SELECT  //  ENTER OPEN  //  ESC CLOSE";
+            : (this.view === "prompt"
+                ? "UP/DOWN SELECT  //  ENTER CONFIRM  //  ESC CANCEL"
+                : "UP/DOWN SELECT  //  ENTER OPEN  //  ESC CLOSE");
 
         if (this.view === "actions") {
-            this.actionListElement.replaceChildren();
-            repository.actions.forEach((action, index) => {
-                const item = this.document.createElement("li");
-                const button = this.document.createElement("button");
-                const pointer = this.document.createElement("span");
-                const label = this.document.createElement("span");
-                const state = this.document.createElement("span");
-                button.id = `repository_action_${action.id}`;
-                button.type = "button";
-                button.dataset.repositoryAction = action.id;
-                button.setAttribute("role", "option");
-                button.setAttribute("aria-selected", index === this.selectedActionIndex ? "true" : "false");
-                button.setAttribute("aria-disabled", action.enabled ? "false" : "true");
-                button.tabIndex = -1;
-                pointer.className = "repository_action_pointer";
-                pointer.textContent = ">";
-                pointer.setAttribute("aria-hidden", "true");
-                label.className = "repository_action_label";
-                label.textContent = action.label;
-                state.className = "repository_action_state";
-                state.textContent = action.enabled ? "" : "UNAVAILABLE";
-                button.append(pointer, label, state);
-                button.addEventListener("mouseenter", () => this._selectAction(index));
-                button.addEventListener("click", event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    this.selectedActionIndex = index;
-                    this.activate(action.id);
-                });
-                item.appendChild(button);
-                this.actionListElement.appendChild(item);
-            });
+            this._renderList(repository.actions, "action", this.selectedActionIndex,
+                index => this._selectAction(index), entry => this.activate(entry.id));
             this._selectAction(this.selectedActionIndex);
             this._renderSummary(repository);
+        } else if (this.view === "prompt" && this.prompt) {
+            this._renderList(this.prompt.choices, "choice", this.selectedChoiceIndex,
+                index => this._selectChoice(index), () => this.activateChoice());
+            this._selectChoice(this.selectedChoiceIndex);
+            this._renderPrompt(this.prompt);
         } else {
             this._renderInfo(repository);
         }
@@ -319,15 +431,36 @@ class RepositoryLauncher {
 
     _renderSummary(repository) {
         this.summaryElement.replaceChildren();
-        [["BRANCH", repository.branch], ["STATUS", repository.status]].forEach(([label, value]) => {
-            const line = this.document.createElement("p");
-            const key = this.document.createElement("span");
-            const output = this.document.createElement("span");
-            key.textContent = `${label}:`;
-            output.textContent = value;
-            line.append(key, output);
-            this.summaryElement.appendChild(line);
-        });
+        const fields = [["BRANCH", repository.branch], ["STATUS", repository.status]];
+        if (repository.process) {
+            fields.push(["PROCESS", repository.process.state], ["PROFILE", repository.process.displayName]);
+        }
+        fields.forEach(field => this._appendSummaryLine(field[0], field[1]));
+    }
+
+    _renderPrompt(prompt) {
+        this.promptElement.replaceChildren();
+        const heading = this.document.createElement("p");
+        heading.className = "repository_prompt_repository";
+        heading.textContent = prompt.repositoryName;
+        this.promptElement.appendChild(heading);
+        prompt.fields.forEach(field => this._appendSummaryLine(field.label, field.value, this.promptElement));
+        if (prompt.warning) {
+            const warning = this.document.createElement("p");
+            warning.className = "repository_run_warning";
+            warning.textContent = prompt.warning;
+            this.promptElement.appendChild(warning);
+        }
+    }
+
+    _appendSummaryLine(label, value, container = this.summaryElement) {
+        const line = this.document.createElement("p");
+        const key = this.document.createElement("span");
+        const output = this.document.createElement("span");
+        key.textContent = `${label}:`;
+        output.textContent = value;
+        line.append(key, output);
+        container.appendChild(line);
     }
 
     _renderInfo(repository) {
@@ -338,7 +471,8 @@ class RepositoryLauncher {
             ["BRANCH", repository.branch],
             ["STATUS", repository.status],
             ["MODIFIED", String(repository.modifiedFileCount)],
-            ["REMOTE", repository.remoteProvider]
+            ["REMOTE", repository.remoteProvider],
+            ["PROCESS", repository.process ? repository.process.state : "STOPPED"]
         ];
         fields.forEach(([label, value]) => {
             const term = this.document.createElement("dt");
@@ -354,6 +488,41 @@ class RepositoryLauncher {
         this._renderMenu();
     }
 
+    _renderList(entries, prefix, selectedIndex, onSelect, onActivate) {
+        this.actionListElement.replaceChildren();
+        entries.forEach((entry, index) => {
+            const item = this.document.createElement("li");
+            const button = this.document.createElement("button");
+            const pointer = this.document.createElement("span");
+            const label = this.document.createElement("span");
+            const state = this.document.createElement("span");
+            button.id = `repository_${prefix}_${entry.id}`;
+            button.type = "button";
+            button.dataset.repositorySelection = entry.id;
+            button.setAttribute("role", "option");
+            button.setAttribute("aria-selected", index === selectedIndex ? "true" : "false");
+            button.setAttribute("aria-disabled", entry.enabled ? "false" : "true");
+            button.tabIndex = -1;
+            pointer.className = "repository_action_pointer";
+            pointer.textContent = ">";
+            pointer.setAttribute("aria-hidden", "true");
+            label.className = "repository_action_label";
+            label.textContent = entry.label;
+            state.className = "repository_action_state";
+            state.textContent = entry.state || (entry.enabled ? "" : "UNAVAILABLE");
+            button.append(pointer, label, state);
+            button.addEventListener("mouseenter", () => onSelect(index));
+            button.addEventListener("click", event => {
+                event.preventDefault();
+                event.stopPropagation();
+                onSelect(index);
+                onActivate(entry);
+            });
+            item.appendChild(button);
+            this.actionListElement.appendChild(item);
+        });
+    }
+
     _selectAction(index) {
         const repository = this._selectedRepository();
         if (!repository || !repository.actions.length) return;
@@ -366,6 +535,17 @@ class RepositoryLauncher {
         if (action) this.element.setAttribute("aria-activedescendant", `repository_action_${action.id}`);
     }
 
+    _selectChoice(index) {
+        if (!this.prompt || !this.prompt.choices.length) return;
+        this.selectedChoiceIndex = (index + this.prompt.choices.length) % this.prompt.choices.length;
+        if (!this.actionListElement) return;
+        this.actionListElement.querySelectorAll("button").forEach((button, buttonIndex) => {
+            button.setAttribute("aria-selected", buttonIndex === this.selectedChoiceIndex ? "true" : "false");
+        });
+        const choice = this.prompt.choices[this.selectedChoiceIndex];
+        if (choice) this.element.setAttribute("aria-activedescendant", `repository_choice_${choice.id}`);
+    }
+
     _handleKeydown(event) {
         if (!this.isOpen) return;
         let handled = true;
@@ -373,6 +553,9 @@ class RepositoryLauncher {
         else if (this.view === "actions" && event.key === "ArrowUp") this._selectAction(this.selectedActionIndex - 1);
         else if (this.view === "actions" && event.key === "ArrowDown") this._selectAction(this.selectedActionIndex + 1);
         else if (this.view === "actions" && event.key === "Enter") this.activateSelected();
+        else if (this.view === "prompt" && event.key === "ArrowUp") this._selectChoice(this.selectedChoiceIndex - 1);
+        else if (this.view === "prompt" && event.key === "ArrowDown") this._selectChoice(this.selectedChoiceIndex + 1);
+        else if (this.view === "prompt" && event.key === "Enter") this.activateChoice();
         else handled = false;
         if (!handled) return;
         event.preventDefault();

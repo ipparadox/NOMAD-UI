@@ -634,10 +634,15 @@ async function initUI() {
             }
             return window.i3WorkspaceClient.refocus(id);
         },
-        onaction: async (repositoryId, actionId) => {
+        onaction: async (repositoryId, actionId, details = {}) => {
             const request = {operation: "action", repositoryId, actionId};
             if (actionId === "code" || actionId === "github") {
                 request.geometry = window.i3WorkspaceClient.geometry();
+            }
+            if (actionId === "run") {
+                if (typeof details.profileId === "string") request.profileId = details.profileId;
+                if (typeof details.authorizationId === "string") request.authorizationId = details.authorizationId;
+                if (typeof details.authorization === "string") request.authorization = details.authorization;
             }
             const result = await ipc.invoke("repository-operation", request);
             if (!result || !result.ok) return result;
@@ -665,6 +670,13 @@ async function initUI() {
         }
     });
     window.refreshRepositories = () => window.repositoryLauncher.refresh();
+    let repositoryStateRefresh = null;
+    ipc.on("repository-process-state", () => {
+        if (repositoryStateRefresh) return;
+        repositoryStateRefresh = window.repositoryLauncher.refresh().finally(() => {
+            repositoryStateRefresh = null;
+        });
+    });
     await window.repositoryLauncher.render();
 
     await _delay(200);

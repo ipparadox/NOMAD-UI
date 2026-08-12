@@ -196,10 +196,36 @@ div.repository_action_summary > p {
     margin: .22vh 0;
 }
 
+div.repository_prompt_summary > p {
+    grid-template-columns: 7em minmax(0, 1fr);
+}
+
 div.repository_action_summary > p > span:last-child {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+div.repository_action_summary > p.repository_prompt_repository {
+    display: block;
+    margin: 0 0 .65vh;
+    padding-bottom: .5vh;
+    border-bottom: .092vh solid rgba(var(--color_r), var(--color_g), var(--color_b), .26);
+    font-family: var(--font_main);
+    font-size: 1.05vh;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+}
+
+div.repository_action_summary > p.repository_run_warning {
+    display: block;
+    margin: .7vh 0 .15vh;
+    padding: .45vh .4vw;
+    border-left: .092vh solid var(--color_red);
+    color: var(--color_red);
+    font-size: .72vh;
+    line-height: 1.45;
+    white-space: pre-line;
 }
 
 dl.repository_info {
@@ -235,6 +261,7 @@ p.repository_action_error {
     padding-left: .4vw;
     border-left: .092vh solid var(--color_red);
     color: var(--color_red);
+    white-space: pre-line;
 }
 
 p.repository_action_help {

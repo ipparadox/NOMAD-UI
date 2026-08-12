@@ -10,6 +10,8 @@ const {
     normalizeGithubRemote,
     terminalCommand
 } = require("../src/classes/repositoryService.js");
+const {RepositoryRunProfileService, RepositoryRunTrustStore} = require("../src/classes/repositoryRunProfileService.js");
+const {RepositoryProcessManager} = require("../src/classes/repositoryProcessManager.js");
 
 function runFile(executable, args) {
     return new Promise((resolve, reject) => {
@@ -118,6 +120,14 @@ async function run() {
         const browserCalls = [];
         const actions = new RepositoryActionService({
             repositoryService: service,
+            runProfileService: new RepositoryRunProfileService({
+                trustStore: new RepositoryRunTrustStore({
+                    trustStorePath: path.join(temporaryRoot, "repository-runs.json")
+                })
+            }),
+            processManager: new RepositoryProcessManager({
+                stateRoot: path.join(temporaryRoot, "repository-state")
+            }),
             shell: "/bin/bash",
             writeTerminal: commandValue => terminalWrites.push(commandValue),
             openCode: (repositoryPath, geometry) => {
@@ -132,7 +142,8 @@ async function run() {
         const actionListing = await actions.list();
         const listedRepository = actionListing.repositories.find(item => item.id === repository.id);
         assert.deepStrictEqual(listedRepository.actions.map(action => [action.id, action.enabled]), [
-            ["code", true], ["terminal", true], ["info", true], ["github", true]
+            ["code", true], ["terminal", true], ["info", true], ["github", true],
+            ["run", false], ["stop", false]
         ]);
         assert(!Object.prototype.hasOwnProperty.call(listedRepository, "githubUrl"));
         assert(!JSON.stringify(actionListing).includes(temporaryRoot));

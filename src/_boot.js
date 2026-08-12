@@ -4,6 +4,7 @@ const {app, BrowserWindow, dialog, shell} = require("electron");
 process.on("uncaughtException", e => {
     signale.fatal(e);
     dialog.showErrorBox("eDEX-UI crashed", e.message || "Cannot retrieve error message.");
+    if (repositoryProcessManager) repositoryProcessManager.terminateAll();
     if (tty) {
         tty.close();
     }
@@ -50,12 +51,17 @@ const {
     RepositoryService,
     handleRepositoryRequest
 } = require("./classes/repositoryService.js");
+const {RepositoryRunProfileService} = require("./classes/repositoryRunProfileService.js");
+const {RepositoryProcessManager} = require("./classes/repositoryProcessManager.js");
 
 ipc.on("log", (e, type, content) => {
     signale[type](content);
 });
 
 var win, tty, extraTtys, i3WindowManager, applicationRegistry, repositoryService, repositoryActions;
+var repositoryRunProfiles, repositoryProcessManager;
+let repositoryShutdownComplete = false;
+let repositoryShutdownPromise = null;
 const settingsFile = path.join(electron.app.getPath("userData"), "settings.json");
 const shortcutsFile = path.join(electron.app.getPath("userData"), "shortcuts.json");
 const lastWindowStateFile = path.join(electron.app.getPath("userData"), "lastWindowState.json");
@@ -299,8 +305,18 @@ app.on('ready', async () => {
         repositoryRoot: settings.repositoryRoot,
         log: (level, message) => signale[level](message)
     });
+    repositoryRunProfiles = new RepositoryRunProfileService();
+    repositoryProcessManager = new RepositoryProcessManager({
+        env: cleanEnv,
+        log: (level, message) => signale[level](message),
+        onState: state => {
+            if (win && !win.isDestroyed()) win.webContents.send("repository-process-state", state);
+        }
+    });
     repositoryActions = new RepositoryActionService({
         repositoryService,
+        runProfileService: repositoryRunProfiles,
+        processManager: repositoryProcessManager,
         shell: settings.shell,
         applicationAvailable: appId => {
             const application = applicationRegistry.get(appId);
@@ -441,10 +457,22 @@ app.on('window-all-closed', () => {
     app.quit();
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', event => {
+    if (repositoryProcessManager && repositoryProcessManager.hasActive() && !repositoryShutdownComplete) {
+        event.preventDefault();
+        if (!repositoryShutdownPromise) {
+            signale.pending("Stopping managed repository processes...");
+            repositoryShutdownPromise = repositoryProcessManager.stopAll().finally(() => {
+                repositoryShutdownComplete = true;
+                app.quit();
+            });
+        }
+        return;
+    }
+    repositoryShutdownComplete = true;
     if (i3WindowManager) i3WindowManager.destroy();
-    tty.close();
-    Object.keys(extraTtys).forEach(key => {
+    if (tty) tty.close();
+    Object.keys(extraTtys || {}).forEach(key => {
         if (extraTtys[key] !== null) {
             extraTtys[key].close();
         }
