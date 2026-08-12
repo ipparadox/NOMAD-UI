@@ -55,6 +55,7 @@ const {
 } = require("./classes/repositoryService.js");
 const {RepositoryRunProfileService} = require("./classes/repositoryRunProfileService.js");
 const {RepositoryProcessManager} = require("./classes/repositoryProcessManager.js");
+const {handleTerminalOperation} = require("./classes/terminalForegroundProcessController.js");
 
 ipc.on("log", (e, type, content) => {
     signale[type](content);
@@ -302,6 +303,12 @@ app.on('ready', async () => {
         signale.error("Lost connection to frontend");
         signale.watch("Waiting for frontend connection...");
     };
+    tty.onforegroundprocesschange = state => {
+        if (win && !win.isDestroyed()) win.webContents.send("terminal-foreground-state", state);
+    };
+    ipc.handle("terminal-operation", (event, ...requestParts) => {
+        return handleTerminalOperation(tty, requestParts);
+    });
 
     repositoryService = new RepositoryService({
         repositoryRoot: settings.repositoryRoot,

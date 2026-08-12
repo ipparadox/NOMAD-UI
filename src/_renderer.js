@@ -515,6 +515,23 @@ async function initUI() {
         element.addEventListener("click", event => {
             if (!event.target.closest(".workspace_control")) window.workspaceManager.focus(slot.id);
         });
+        if (slot.id === "terminal") {
+            const controls = document.createElement("span");
+            controls.className = "workspace_controls terminal_foreground_controls";
+            controls.hidden = true;
+            const stop = document.createElement("button");
+            stop.id = "terminal_stop_foreground";
+            stop.className = "workspace_control terminal_foreground_stop";
+            stop.type = "button";
+            stop.title = "Stop foreground process";
+            stop.setAttribute("aria-label", "Stop terminal foreground process");
+            stop.textContent = "X";
+            stop.hidden = true;
+            stop.disabled = true;
+            controls.appendChild(stop);
+            label.appendChild(controls);
+            return element;
+        }
         if (slot.type !== "external") return element;
         const controls = document.createElement("span");
         controls.className = "workspace_controls";
@@ -555,6 +572,16 @@ async function initUI() {
             window.term[0].term.focus();
         }
     });
+    window.terminalForegroundControl = new TerminalForegroundControl({
+        button: document.getElementById("terminal_stop_foreground"),
+        ipc,
+        onResume: () => {
+            if (window.workspaceManager.activeSlotId !== "terminal"
+                || !window.term || !window.term[window.currentTerm]) return;
+            window.term[window.currentTerm].term.focus();
+        }
+    });
+    window.terminalForegroundControl.initialize();
     window.i3WorkspaceClient = new I3WorkspaceClient({
         ipc,
         manager: window.workspaceManager,

@@ -48,6 +48,16 @@ button.workspace_control {
     cursor: pointer;
 }
 
+.terminal_foreground_controls[hidden],
+button.terminal_foreground_stop[hidden] {
+    display: none;
+}
+
+button.terminal_foreground_stop:disabled {
+    cursor: default;
+    opacity: 0.4;
+}
+
 li:not(.active) .workspace_controls {
     display: none;
 }

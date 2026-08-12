@@ -313,6 +313,7 @@ class Terminal {
             this.onopened = () => {};
             this.onresize = () => {};
             this.ondisconnected = () => {};
+            this.onforegroundprocesschange = () => {};
 
             this._disableCWDtracking = false;
             this._getTtyCWD = tty => {
@@ -414,7 +415,20 @@ class Terminal {
                 env: opts.env || process.env
             });
 
+            const {TerminalForegroundProcessController} = require("./terminalForegroundProcessController.js");
+            this.foregroundProcessController = new TerminalForegroundProcessController({
+                shellPid: this.tty.pid,
+                onState: state => this.onforegroundprocesschange(state),
+                log: (level, message) => console.log(message)
+            });
+            this.getForegroundProcessState = () => this.foregroundProcessController.refresh();
+            this.stopForeground = () => this.foregroundProcessController.stopForeground();
+            this.foregroundProcessController.start().catch(e => {
+                console.log("Error while initializing TTY foreground process tracking: ", e);
+            });
+
             this.tty.onExit((code, signal) => {
+                this.foregroundProcessController.destroy();
                 this._closed = true;
                 this.onclosed(code, signal);
             });
@@ -475,6 +489,7 @@ class Terminal {
             });
 
             this.close = () => {
+                this.foregroundProcessController.destroy();
                 this.tty.kill();
                 this._closed = true;
             };
