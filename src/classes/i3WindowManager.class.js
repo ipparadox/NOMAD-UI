@@ -6,6 +6,66 @@ const WINDOW_MANAGER_OPERATIONS = new Set([
 ]);
 const GEOMETRY_OPERATIONS = new Set(["launch", "focus", "restore", "unfullscreen", "geometry"]);
 
+function i3TreeChildren(node) {
+    if (!node || typeof node !== "object") return [];
+    const tiled = Array.isArray(node.nodes) ? node.nodes : [];
+    const floating = Array.isArray(node.floating_nodes) ? node.floating_nodes : [];
+    return tiled.concat(floating);
+}
+
+function findI3TreeNode(node, predicate) {
+    if (!node || typeof predicate !== "function") return null;
+    if (predicate(node)) return node;
+    const children = i3TreeChildren(node);
+    for (let index = 0; index < children.length; index++) {
+        const match = findI3TreeNode(children[index], predicate);
+        if (match) return match;
+    }
+    return null;
+}
+
+function findI3TreeContext(node, predicate, ancestors = []) {
+    if (!node || typeof predicate !== "function") return null;
+    if (predicate(node)) return {node, ancestors};
+    const children = i3TreeChildren(node);
+    for (let index = 0; index < children.length; index++) {
+        const match = findI3TreeContext(children[index], predicate, ancestors.concat(node));
+        if (match) return match;
+    }
+    return null;
+}
+
+function collectI3TreeNodes(node, predicate, matches = []) {
+    if (!node || typeof predicate !== "function") return matches;
+    if (predicate(node)) matches.push(node);
+    i3TreeChildren(node).forEach(child => collectI3TreeNodes(child, predicate, matches));
+    return matches;
+}
+
+function containsFocusedI3Node(node) {
+    if (!node) return false;
+    if (node.focused === true) return true;
+    return i3TreeChildren(node).some(child => containsFocusedI3Node(child));
+}
+
+// i3 places X11 clients below one or more wrapper containers, particularly
+// for floating windows. A wrapper can occasionally carry copied properties,
+// so only the deepest property/window-bearing node in each branch is a client
+// leaf suitable for window identity work.
+function collectI3ClientLeaves(node, ancestors = []) {
+    if (!node || typeof node !== "object") return [];
+    const descendants = [];
+    i3TreeChildren(node).forEach(child => {
+        descendants.push(...collectI3ClientLeaves(child, ancestors.concat(node)));
+    });
+    if (descendants.length) return descendants;
+
+    const properties = node.window_properties;
+    const hasProperties = properties && typeof properties === "object" && !Array.isArray(properties);
+    const hasWindow = Number.isSafeInteger(node.window) && node.window > 0;
+    return hasProperties || hasWindow ? [{node, ancestors}] : [];
+}
+
 function normalizeGeometry(geometry) {
     if (!geometry || typeof geometry !== "object" || Array.isArray(geometry)) return null;
     if (Object.keys(geometry).some(key => !["x", "y", "width", "height"].includes(key))) return null;
@@ -239,30 +299,15 @@ class I3WindowManager {
     }
 
     _walk(node, predicate) {
-        if (predicate(node)) return node;
-        const children = (node.nodes || []).concat(node.floating_nodes || []);
-        for (let i = 0; i < children.length; i++) {
-            const match = this._walk(children[i], predicate);
-            if (match) return match;
-        }
-        return null;
+        return findI3TreeNode(node, predicate);
     }
 
     _walkContext(node, predicate, ancestors = []) {
-        if (predicate(node)) return {node, ancestors};
-        const children = (node.nodes || []).concat(node.floating_nodes || []);
-        for (let i = 0; i < children.length; i++) {
-            const match = this._walkContext(children[i], predicate, ancestors.concat(node));
-            if (match) return match;
-        }
-        return null;
+        return findI3TreeContext(node, predicate, ancestors);
     }
 
     _containsFocusedNode(node) {
-        if (!node) return false;
-        if (node.focused === true) return true;
-        const children = (node.nodes || []).concat(node.floating_nodes || []);
-        return children.some(child => this._containsFocusedNode(child));
+        return containsFocusedI3Node(node);
     }
 
     _observeWindow(context) {
@@ -330,10 +375,7 @@ class I3WindowManager {
     }
 
     _walkAll(node, predicate, matches = []) {
-        if (predicate(node)) matches.push(node);
-        const children = (node.nodes || []).concat(node.floating_nodes || []);
-        children.forEach(child => this._walkAll(child, predicate, matches));
-        return matches;
+        return collectI3TreeNodes(node, predicate, matches);
     }
 
     async _checkManagedWindows() {
@@ -410,7 +452,13 @@ class I3WindowManager {
 module.exports = {
     I3WindowManager,
     WINDOW_MANAGER_OPERATIONS,
+    collectI3ClientLeaves,
+    collectI3TreeNodes,
+    containsFocusedI3Node,
+    findI3TreeContext,
+    findI3TreeNode,
     handleWindowManagerRequest,
+    i3TreeChildren,
     normalizeGeometry,
     validateWindowManagerRequest
 };

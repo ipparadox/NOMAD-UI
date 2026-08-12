@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+launcher_source="${BASH_SOURCE[0]}"
+if resolved_source="$(readlink -f -- "$launcher_source" 2>/dev/null)"; then
+    launcher_source="$resolved_source"
+fi
+readonly NOMAD_CLI_ROOT="$(cd -- "$(dirname -- "$launcher_source")/.." && pwd)"
+readonly NOMAD_CLI_MAIN="$NOMAD_CLI_ROOT/src/cli/main.js"
+
+[[ -f "$NOMAD_CLI_MAIN" ]] || {
+    printf 'NOMAD CLI installation is broken: %s is missing\n' "$NOMAD_CLI_MAIN" >&2
+    exit 1
+}
+
+node_is_supported() {
+    local candidate="$1"
+    local major_version
+    [[ -x "$candidate" ]] || return 1
+    major_version="$("$candidate" -p 'process.versions.node.split(".")[0]' 2>/dev/null)" || return 1
+    [[ "$major_version" =~ ^[0-9]+$ ]] && ((major_version >= 14))
+}
+
+if [[ -n "${NOMAD_NODE:-}" ]]; then
+    node_is_supported "$NOMAD_NODE" || {
+        printf 'NOMAD_NODE does not identify a supported Node.js executable.\n' >&2
+        exit 1
+    }
+    exec "$NOMAD_NODE" "$NOMAD_CLI_MAIN" "$@"
+fi
+
+if path_node="$(command -v node 2>/dev/null)" && node_is_supported "$path_node"; then
+    exec "$path_node" "$NOMAD_CLI_MAIN" "$@"
+fi
+
+readonly NOMAD_CLI_NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+shopt -s nullglob
+node_candidates=("$NOMAD_CLI_NVM_DIR"/versions/node/v*/bin/node)
+shopt -u nullglob
+for node_candidate in "${node_candidates[@]}"; do
+    if node_is_supported "$node_candidate"; then
+        exec "$node_candidate" "$NOMAD_CLI_MAIN" "$@"
+    fi
+done
+
+printf 'NOMAD CLI requires Node.js 14 or newer. No supported runtime was found.\n' >&2
+exit 1

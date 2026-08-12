@@ -35,6 +35,34 @@ function isPlainObject(value) {
         && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
 }
 
+function parseApplicationRegistryContent(content) {
+    if (Buffer.isBuffer(content)) content = content.toString("utf8");
+    if (typeof content !== "string") throw new TypeError("Application registry must be text");
+    if (Buffer.byteLength(content, "utf8") > MAX_REGISTRY_BYTES) throw new Error("Application registry is too large");
+
+    let parsed;
+    try {
+        parsed = JSON.parse(content);
+    } catch (error) {
+        throw new Error("Application registry is not valid JSON");
+    }
+
+    let entries;
+    if (Array.isArray(parsed)) {
+        entries = parsed;
+    } else if (isPlainObject(parsed)) {
+        if (Object.keys(parsed).some(key => !ROOT_KEYS.has(key)) || (typeof parsed.version !== "undefined" && parsed.version !== 1)) {
+            throw new Error("Application registry root is invalid");
+        }
+        entries = parsed.applications;
+    }
+
+    if (!Array.isArray(entries) || entries.length > MAX_APPLICATIONS) {
+        throw new Error("Application registry applications must be an array");
+    }
+    return entries;
+}
+
 function containsControlCharacters(value) {
     return /[\u0000-\u001f\u007f]/.test(value);
 }
@@ -254,6 +282,15 @@ class ApplicationRegistry {
         return application ? cloneApplication(application) : null;
     }
 
+    validateUserEntry(entry, launcherOrder = 100) {
+        const application = this._normalize(entry, {
+            trusted: false,
+            launcherOrder
+        });
+        if (this.protectedIds.has(application.id)) throw new Error("application ID is protected");
+        return application;
+    }
+
     _readUserEntries() {
         let stats;
         try {
@@ -269,32 +306,13 @@ class ApplicationRegistry {
             return [];
         }
 
-        let parsed;
         try {
             const content = this.fs.readFileSync(this.registryPath, {encoding: "utf8"});
-            if (Buffer.byteLength(content, "utf8") > MAX_REGISTRY_BYTES) throw new Error("Registry is too large");
-            parsed = JSON.parse(content);
+            return parseApplicationRegistryContent(content);
         } catch (error) {
             this.log("warn", "REGISTRY ENTRY INVALID: apps.json is not valid JSON");
             return [];
         }
-
-        let entries;
-        if (Array.isArray(parsed)) {
-            entries = parsed;
-        } else if (isPlainObject(parsed)) {
-            if (Object.keys(parsed).some(key => !ROOT_KEYS.has(key)) || (typeof parsed.version !== "undefined" && parsed.version !== 1)) {
-                this.log("warn", "REGISTRY ENTRY INVALID: apps.json root is invalid");
-                return [];
-            }
-            entries = parsed.applications;
-        }
-
-        if (!Array.isArray(entries) || entries.length > MAX_APPLICATIONS) {
-            this.log("warn", "REGISTRY ENTRY INVALID: applications must be an array");
-            return [];
-        }
-        return entries;
     }
 
     _normalize(entry, opts) {
@@ -402,6 +420,7 @@ module.exports = {
     executableExists,
     handleApplicationRegistryRequest,
     normalizeWindowMatchers,
+    parseApplicationRegistryContent,
     validateArgs,
     validateExecutable
 };
