@@ -326,12 +326,75 @@ async function run() {
     assert.strictEqual(reload.code, 0);
     assert(reload.stdout.includes("RESTART NOMAD SESSION TO APPLY"));
 
+    const repositoryCalls = [];
+    const repositoryCliService = {
+        list: async () => ({
+            status: null,
+            repositories: [{
+                id: "repo_0123456789abcdef0123456789abcdef",
+                displayName: "NOMAD-UI",
+                branch: "main",
+                status: "CLEAN",
+                pullState: "PULL"
+            }]
+        }),
+        clone: async repositoryUrl => {
+            repositoryCalls.push(["clone", repositoryUrl]);
+            return {ok: true, status: "CLONE COMPLETE\nREPOSITORY REGISTERED"};
+        },
+        info: async repository => {
+            repositoryCalls.push(["info", repository]);
+            return {
+                id: "repo_0123456789abcdef0123456789abcdef",
+                displayName: "NOMAD-UI",
+                branch: "main",
+                status: "CLEAN",
+                remote: "https://github.com/nomad-lab/NOMAD-UI",
+                upstream: "origin/main",
+                ahead: 0,
+                behind: 1,
+                pullState: "PULL"
+            };
+        },
+        pull: async repository => {
+            repositoryCalls.push(["pull", repository]);
+            return {ok: true, status: "UPDATE COMPLETE"};
+        }
+    };
+    const repositoryList = await invoke(["repo", "list"], {repositoryCliService});
+    assert.strictEqual(repositoryList.code, 0);
+    assert(repositoryList.stdout.includes("NOMAD REPOSITORIES"));
+    assert(repositoryList.stdout.includes("NOMAD-UI"));
+    assert(repositoryList.stdout.includes("PULL"));
+    const repositoryClone = await invoke(["repo", "clone", "git@github.com:owner/repo.git"], {repositoryCliService});
+    assert.strictEqual(repositoryClone.code, 0);
+    assert(repositoryClone.stdout.includes("REPOSITORY REGISTERED"));
+    const repositoryInfo = await invoke(["repo", "info", "NOMAD-UI"], {repositoryCliService});
+    assert.strictEqual(repositoryInfo.code, 0);
+    assert(repositoryInfo.stdout.includes("UPSTREAM: origin/main"));
+    assert(repositoryInfo.stdout.includes("BEHIND: 1"));
+    const repositoryPull = await invoke(["repo", "pull", "NOMAD-UI"], {repositoryCliService});
+    assert.strictEqual(repositoryPull.code, 0);
+    assert(repositoryPull.stdout.includes("UPDATE COMPLETE"));
+    assert.deepStrictEqual(repositoryCalls, [
+        ["clone", "git@github.com:owner/repo.git"],
+        ["info", "NOMAD-UI"],
+        ["pull", "NOMAD-UI"]
+    ]);
+    const rawGit = await invoke(["repo", "git", "status"], {repositoryCliService});
+    assert.strictEqual(rawGit.code, 2);
+    assert(rawGit.stderr.includes("UNKNOWN REPO COMMAND"));
+
     const help = await invoke(["--help"], {});
     const appHelp = await invoke(["app", "--help"], {});
+    const repoHelp = await invoke(["repo", "--help"], {});
     assert.strictEqual(help.code, 0);
     assert(help.stdout.includes("nomad install <application> [--apply]"));
+    assert(help.stdout.includes("repo clone <github-url>"));
     assert.strictEqual(appHelp.code, 0);
     assert(appHelp.stdout.includes("nomad app scan"));
+    assert.strictEqual(repoHelp.code, 0);
+    assert(repoHelp.stdout.includes("nomad repo pull <repository>"));
 
     fs.rmSync(temporaryRoot, {recursive: true, force: true});
     console.log("NOMAD CLI registry, discovery, install planning, execution safety, and post-install registration passed");

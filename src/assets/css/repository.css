@@ -13,6 +13,25 @@ section#repository > h3.title {
     padding-right: 0;
 }
 
+button#repository_add {
+    margin: 0;
+    padding: 0 .25vw;
+    border: 0;
+    border-radius: 0;
+    color: rgba(var(--color_r), var(--color_g), var(--color_b), .7);
+    background: transparent;
+    font: inherit;
+    letter-spacing: .08em;
+    cursor: pointer;
+    outline: none;
+}
+
+button#repository_add:hover,
+button#repository_add:focus {
+    color: rgb(var(--color_r), var(--color_g), var(--color_b));
+    background: rgba(var(--color_r), var(--color_g), var(--color_b), .08);
+}
+
 div#repository_container {
     position: relative;
     left: .35vw;
@@ -124,8 +143,51 @@ ul#repository_action_list {
 ul#repository_action_list[hidden],
 dl.repository_info[hidden],
 div.repository_action_summary[hidden],
+div.repository_clone_form[hidden],
 p.repository_action_error[hidden] {
     display: none;
+}
+
+div.repository_clone_form {
+    margin: .85vh 0 .2vh;
+    font-family: var(--font_mono);
+}
+
+div.repository_clone_form label {
+    display: block;
+    margin-bottom: .45vh;
+    color: rgba(var(--color_r), var(--color_g), var(--color_b), .62);
+    font-size: .78vh;
+    letter-spacing: .1em;
+}
+
+div.repository_clone_form input {
+    box-sizing: border-box;
+    width: 100%;
+    padding: .58vh .42vw;
+    border: .092vh solid rgba(var(--color_r), var(--color_g), var(--color_b), .45);
+    border-radius: 0;
+    color: rgb(var(--color_r), var(--color_g), var(--color_b));
+    background: rgba(0, 0, 0, .42);
+    font-family: var(--font_mono);
+    font-size: .9vh;
+    outline: none;
+}
+
+div.repository_clone_form input:focus {
+    border-color: rgb(var(--color_r), var(--color_g), var(--color_b));
+    box-shadow: inset .18vh 0 0 rgb(var(--color_r), var(--color_g), var(--color_b));
+}
+
+p.repository_clone_complete {
+    display: block;
+    margin: .8vh 0 .25vh;
+    color: rgb(var(--color_r), var(--color_g), var(--color_b));
+    font-family: var(--font_mono);
+    font-size: .9vh;
+    letter-spacing: .09em;
+    line-height: 1.6;
+    white-space: pre-line;
 }
 
 ul#repository_action_list button {

@@ -138,7 +138,7 @@ async function run() {
 
         let listing = await actions.list();
         const repository = listing.repositories[0];
-        assert.deepStrictEqual(repository.actions.map(action => action.id), ["code", "terminal", "info", "github", "run", "stop"]);
+        assert.deepStrictEqual(repository.actions.map(action => action.id), ["code", "terminal", "info", "github", "run", "stop", "pull"]);
         assert.deepStrictEqual(repository.actions.slice(0, 4).map(action => action.enabled), [true, true, true, true]);
         assert.deepStrictEqual(repository.actions.find(action => action.id === "run"), {
             id: "run", label: "RUN", enabled: true, state: "AUTH REQUIRED"

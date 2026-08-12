@@ -603,18 +603,22 @@ async function initUI() {
     window.term[0].onprocesschange = p => {
         document.getElementById("workspace_slot_terminal").title = `MAIN - ${p}`;
     };
-    // Prevent losing hardware keyboard focus on the terminal when using touch keyboard
-    window.onmouseup = e => {
-        if (window.keyboard.linkedToTerm && window.workspaceManager.activeSlotId === "terminal") {
-            window.term[window.currentTerm].term.focus();
+    // Keep touch-keyboard clicks linked to xterm unless a lightweight overlay owns text input.
+    window.nomadInputCapture = new InputCaptureController({
+        getKeyboard: () => window.keyboard,
+        isTerminalActive: () => window.workspaceManager.activeSlotId === "terminal",
+        focusTerminal: () => window.term[window.currentTerm].term.focus(),
+        onchange: () => {
+            if (typeof window.registerKeyboardShortcuts === "function") window.registerKeyboardShortcuts();
         }
-    };
+    });
+    window.onmouseup = () => window.nomadInputCapture.handleMouseup();
     window.term[0].term.writeln("\033[1m"+`Welcome to eDEX-UI v${electron.remote.app.getVersion()} - Electron v${process.versions.electron}`+"\033[0m");
 
     await _delay(100);
 
     document.getElementById("repository").innerHTML = `
-        <h3 class="title"><p>REPOSITORIES</p><p>ACTIONS</p></h3>
+        <h3 class="title"><p>REPOSITORIES</p><p><button id="repository_add" type="button">+ REPOSITORY</button></p></h3>
         <div id="repository_container"></div>`;
     const folderIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     folderIcon.setAttribute("viewBox", "0 0 24 24");
@@ -624,8 +628,18 @@ async function initUI() {
     folderIcon.appendChild(folderPath);
     window.repositoryLauncher = new RepositoryLauncher({
         container: "repository_container",
+        addTrigger: "repository_add",
         folderIcon,
         loadRepositories: () => ipc.invoke("repository-operation", {operation: "refresh"}),
+        onclone: repositoryUrl => ipc.invoke("repository-operation", {
+            operation: "clone",
+            repositoryUrl
+        }),
+        oncancelclone: () => ipc.invoke("repository-operation", {operation: "cancel-clone"}),
+        onInputCaptureChange: active => {
+            if (active) window.nomadInputCapture.acquire("repository-clone");
+            else window.nomadInputCapture.release("repository-clone");
+        },
         getActiveId: () => window.workspaceManager.activeSlotId,
         onResume: id => {
             if (id === "terminal" && window.term && window.term[window.currentTerm]) {
@@ -676,6 +690,9 @@ async function initUI() {
         repositoryStateRefresh = window.repositoryLauncher.refresh().finally(() => {
             repositoryStateRefresh = null;
         });
+    });
+    ipc.on("repository-git-state", (event, state) => {
+        if (window.repositoryLauncher) window.repositoryLauncher.updateGitState(state);
     });
     await window.repositoryLauncher.render();
 
@@ -1252,6 +1269,8 @@ const globalShortcut = electron.remote.globalShortcut;
 globalShortcut.unregisterAll();
 
 window.registerKeyboardShortcuts = () => {
+    globalShortcut.unregisterAll();
+    if (window.nomadInputCapture && window.nomadInputCapture.active) return false;
     window.shortcuts.forEach(cut => {
         if (!cut.enabled) return;
 
@@ -1276,6 +1295,7 @@ window.registerKeyboardShortcuts = () => {
             console.warn(`${cut.trigger} has unknown type`);
         }
     });
+    return true;
 };
 window.registerKeyboardShortcuts();
 
@@ -1290,6 +1310,8 @@ window.addEventListener("blur", () => {
 
 // Prevent showing menu, exiting fullscreen or app with keyboard shortcuts
 document.addEventListener("keydown", e => {
+    const repositoryInputFocused = window.repositoryLauncher
+        && window.repositoryLauncher.ownsInputTarget(e.target);
     if (e.key === "Alt") {
         e.preventDefault();
     }
@@ -1302,7 +1324,7 @@ document.addEventListener("keydown", e => {
     if (e.code === "KeyD" && e.ctrlKey) {
         e.preventDefault();
     }
-    if (e.code === "KeyA" && e.ctrlKey) {
+    if (e.code === "KeyA" && e.ctrlKey && !repositoryInputFocused) {
         e.preventDefault();
     }
 });

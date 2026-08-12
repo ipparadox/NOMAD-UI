@@ -2,7 +2,13 @@ const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const {execFile} = require("child_process");
+const {
+    RepositoryGitError,
+    RepositoryGitExecutor,
+    RepositoryGitService,
+    isNormalizedGithubUrl,
+    normalizeGithubRemote
+} = require("./repositoryGitService.js");
 const {
     PROFILE_ID_PATTERN,
     RepositoryRunError,
@@ -16,7 +22,6 @@ const {
 
 const REPOSITORY_ID_PATTERN = /^repo_[a-f0-9]{32}$/;
 const ACTION_ID_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
-const MAX_GIT_OUTPUT = 4 * 1024 * 1024;
 const MAX_FILTER_CONFIG_KEYS = 128;
 
 const REPOSITORY_ACTIONS = Object.freeze([
@@ -25,7 +30,8 @@ const REPOSITORY_ACTIONS = Object.freeze([
     Object.freeze({id: "info", label: "INFO"}),
     Object.freeze({id: "github", label: "GITHUB"}),
     Object.freeze({id: "run", label: "RUN"}),
-    Object.freeze({id: "stop", label: "STOP"})
+    Object.freeze({id: "stop", label: "STOP"}),
+    Object.freeze({id: "pull", label: "PULL"})
 ]);
 
 class RepositoryError extends Error {
@@ -65,38 +71,6 @@ function repositoryId(root, childName) {
     return `repo_${digest.slice(0, 32)}`;
 }
 
-function normalizeGithubParts(owner, repository) {
-    if (repository.toLowerCase().endsWith(".git")) repository = repository.slice(0, -4);
-    if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(owner)) return null;
-    if (!/^[A-Za-z0-9._-]{1,100}$/.test(repository) || repository === "." || repository === "..") return null;
-    return `https://github.com/${owner}/${repository}`;
-}
-
-function normalizeGithubRemote(value) {
-    if (typeof value !== "string") return null;
-    const remote = value.trim();
-    if (!remote || remote.length > 512 || /[\u0000-\u001f\u007f]/.test(remote)) return null;
-
-    const ssh = /^git@github\.com:([^/]+)\/([^/]+)$/.exec(remote);
-    if (ssh) return normalizeGithubParts(ssh[1], ssh[2]);
-
-    let parsed;
-    try {
-        parsed = new URL(remote);
-    } catch (error) {
-        return null;
-    }
-    if (parsed.protocol !== "https:" || parsed.hostname.toLowerCase() !== "github.com") return null;
-    if (parsed.port || parsed.username || parsed.password || parsed.search || parsed.hash) return null;
-    const match = /^\/([^/]+)\/([^/]+)$/.exec(parsed.pathname);
-    if (!match) return null;
-    return normalizeGithubParts(match[1], match[2]);
-}
-
-function isNormalizedGithubUrl(value) {
-    return typeof value === "string" && normalizeGithubRemote(value) === value;
-}
-
 function terminalCommand(repositoryPath, shell, pathModule = path) {
     if (typeof repositoryPath !== "string" || !pathModule.isAbsolute(repositoryPath)) {
         throw new RepositoryError("REPOSITORY NOT FOUND");
@@ -124,9 +98,19 @@ class RepositoryService {
         this.home = opts.home || os.homedir();
         this.fs = opts.fs || fs;
         this.path = opts.path || path;
-        this.execFile = opts.execFile || execFile;
-        this.gitExecutable = opts.gitExecutable || "git";
         this.log = opts.log || (() => {});
+        this.gitExecutor = opts.gitExecutor || new RepositoryGitExecutor({
+            fs: this.fs,
+            path: this.path,
+            execFile: opts.execFile,
+            execFileSync: opts.execFileSync,
+            spawn: opts.spawn,
+            env: opts.env,
+            gitExecutable: opts.gitExecutable,
+            resolveGitExecutable: opts.resolveGitExecutable,
+            log: this.log
+        });
+        this.gitExecutable = this.gitExecutor.gitExecutable;
         this.repositories = new Map();
         this.canonicalRoot = null;
         this.setRepositoryRoot(opts.repositoryRoot);
@@ -143,13 +127,18 @@ class RepositoryService {
         return true;
     }
 
+    resolveCanonicalRoot() {
+        const configuredRoot = this.path.resolve(expandHome(this.repositoryRoot, this.home));
+        const canonicalRoot = this.fs.realpathSync(configuredRoot);
+        if (!this.fs.statSync(canonicalRoot).isDirectory()) throw new RepositoryError("REPOSITORY ROOT NOT FOUND");
+        return canonicalRoot;
+    }
+
     async refresh() {
         let canonicalRoot;
         let children;
         try {
-            const configuredRoot = this.path.resolve(expandHome(this.repositoryRoot, this.home));
-            canonicalRoot = this.fs.realpathSync(configuredRoot);
-            if (!this.fs.statSync(canonicalRoot).isDirectory()) throw new RepositoryError("REPOSITORY ROOT NOT FOUND");
+            canonicalRoot = this.resolveCanonicalRoot();
             children = this.fs.readdirSync(canonicalRoot, {withFileTypes: true});
         } catch (error) {
             this.repositories = new Map();
@@ -205,7 +194,8 @@ class RepositoryService {
             return null;
         }
 
-        if (await this._git(canonicalPath, ["rev-parse", "--is-inside-work-tree"], true) !== "true") return null;
+        if (await this._git(canonicalPath, ["rev-parse", "--is-inside-work-tree"], true) !== "true"
+            || !await this._isCanonicalWorkTree(canonicalPath)) return null;
         const record = {
             id: repositoryId(canonicalRoot, childName),
             childName,
@@ -245,8 +235,19 @@ class RepositoryService {
         } catch (error) {
             return null;
         }
-        if (await this._git(canonicalPath, ["rev-parse", "--is-inside-work-tree"], true) !== "true") return null;
+        if (await this._git(canonicalPath, ["rev-parse", "--is-inside-work-tree"], true) !== "true"
+            || !await this._isCanonicalWorkTree(canonicalPath)) return null;
         return record;
+    }
+
+    async _isCanonicalWorkTree(canonicalPath) {
+        const topLevel = await this._git(canonicalPath, ["rev-parse", "--show-toplevel"]);
+        if (!topLevel || topLevel.includes("\0")) return false;
+        try {
+            return this.fs.realpathSync(topLevel) === canonicalPath;
+        } catch (error) {
+            return false;
+        }
     }
 
     _validChildName(childName) {
@@ -260,10 +261,19 @@ class RepositoryService {
         const branchPromise = this._git(record.canonicalPath, ["symbolic-ref", "--short", "-q", "HEAD"]);
         const detachedHeadPromise = this._git(record.canonicalPath, ["rev-parse", "--short", "HEAD"]);
         const remotesPromise = this._git(record.canonicalPath, ["remote"]);
-        const originRemotePromise = this._git(record.canonicalPath, ["remote", "get-url", "origin"]);
+        const originRemotePromise = this._git(
+            record.canonicalPath,
+            ["config", "--includes", "--null", "--get-all", "remote.origin.url"],
+            false,
+            {acceptExitCodeOne: true}
+        );
+        const upstreamPromise = this._git(
+            record.canonicalPath,
+            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]
+        );
         const remoteIdentityPromise = this._git(
             record.canonicalPath,
-            ["config", "--null", "--get-regexp", "^remote\\..*\\.url$"],
+            ["config", "--includes", "--null", "--get-regexp", "^remote\\..*\\.url$"],
             false,
             {acceptExitCodeOne: true}
         );
@@ -276,12 +286,13 @@ class RepositoryService {
                 false,
                 {configOverrides: filterOverrides}
             );
-        const [branchName, detachedHead, statusOutput, remotesOutput, originRemote, remoteIdentity] = await Promise.all([
+        const [branchName, detachedHead, statusOutput, remotesOutput, originRemoteOutput, upstreamName, remoteIdentity] = await Promise.all([
             branchPromise,
             detachedHeadPromise,
             statusPromise,
             remotesPromise,
             originRemotePromise,
+            upstreamPromise,
             remoteIdentityPromise
         ]);
         record.repositoryIdentity = remoteIdentity === null ? null : this._identity([
@@ -290,8 +301,22 @@ class RepositoryService {
         ]);
         const statusEntries = statusOutput === null ? null : this._statusEntryCount(statusOutput);
         const remotes = (remotesOutput || "").split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+        const originRemotes = (originRemoteOutput || "").split("\0").filter(Boolean);
+        const originRemote = originRemotes.length === 1 ? originRemotes[0] : null;
         const githubUrl = normalizeGithubRemote(originRemote);
         const remoteAvailable = remotes.length > 0;
+        let ahead = null;
+        let behind = null;
+        if (upstreamName) {
+            const counts = await this._git(record.canonicalPath, [
+                "rev-list", "--left-right", "--count", "HEAD...@{upstream}"
+            ], true);
+            const match = /^(\d+)\s+(\d+)$/.exec(counts || "");
+            if (match) {
+                ahead = Number(match[1]);
+                behind = Number(match[2]);
+            }
+        }
         const branch = branchName
             ? sanitizeText(branchName, "UNKNOWN", 160)
             : (detachedHead ? `DETACHED@${sanitizeText(detachedHead, "UNKNOWN", 40)}` : "UNKNOWN");
@@ -306,6 +331,10 @@ class RepositoryService {
             modifiedFileCount: statusEntries === null ? 0 : statusEntries,
             remoteAvailable,
             remoteProvider: githubUrl ? "GITHUB" : (remoteAvailable ? "OTHER" : "NONE"),
+            remote: githubUrl || (remoteAvailable ? "UNSUPPORTED" : "NONE"),
+            upstream: upstreamName ? sanitizeText(upstreamName, "NONE", 255) : "NONE",
+            ahead,
+            behind,
             githubUrl
         };
     }
@@ -333,7 +362,7 @@ class RepositoryService {
     async _filterOverrides(repositoryPath) {
         const output = await this._git(
             repositoryPath,
-            ["config", "--null", "--name-only", "--get-regexp", "^filter\\."],
+            ["config", "--includes", "--null", "--name-only", "--get-regexp", "^(filter\\.|diff\\.)"],
             false,
             {acceptExitCodeOne: true}
         );
@@ -344,10 +373,21 @@ class RepositoryService {
         if (keys.length > MAX_FILTER_CONFIG_KEYS) return null;
 
         const drivers = new Set();
+        const diffDrivers = new Set();
         for (const key of keys) {
             if (key.length > 512 || /[\u0000-\u001f\u007f]/.test(key)) return null;
             const match = /^(filter\..+)\.(clean|smudge|process|required)$/i.exec(key);
-            if (match) drivers.add(match[1]);
+            if (match) {
+                const driverName = match[1].slice("filter.".length);
+                if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(driverName)) return null;
+                drivers.add(match[1]);
+            }
+            const diffMatch = /^(diff\..+)\.(command|textconv|cachetextconv)$/i.exec(key);
+            if (diffMatch) {
+                const driverName = diffMatch[1].slice("diff.".length);
+                if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(driverName)) return null;
+                diffDrivers.add(diffMatch[1]);
+            }
         }
         const overrides = [];
         drivers.forEach(driver => {
@@ -358,48 +398,28 @@ class RepositoryService {
                 [`${driver}.required`, "false"]
             );
         });
+        diffDrivers.forEach(driver => {
+            overrides.push(
+                [`${driver}.command`, ""],
+                [`${driver}.textconv`, ""],
+                [`${driver}.cachetextconv`, "false"]
+            );
+        });
         return overrides;
     }
 
     _git(repositoryPath, args, exact = false, opts = {}) {
-        return new Promise(resolve => {
-            const nullDevice = process.platform === "win32" ? "NUL" : "/dev/null";
-            const commandArgs = [
-                "--no-pager",
-                "-c", "core.fsmonitor=false",
-                "-c", `core.hooksPath=${nullDevice}`,
-                "-c", "diff.external=",
-                "-c", "interactive.diffFilter="
-            ];
-            (opts.configOverrides || []).forEach(([key, value]) => commandArgs.push("-c", `${key}=${value}`));
-            commandArgs.push("-C", repositoryPath, ...args);
-            const options = {
-                encoding: "utf8",
-                timeout: 3000,
-                maxBuffer: MAX_GIT_OUTPUT,
-                windowsHide: true,
-                shell: false,
-                env: Object.assign({}, process.env, {
-                    GIT_OPTIONAL_LOCKS: "0",
-                    GIT_PAGER: "cat",
-                    GIT_TERMINAL_PROMPT: "0",
-                    PAGER: "cat"
-                })
-            };
-            try {
-                this.execFile(this.gitExecutable, commandArgs, options, (error, stdout) => {
-                    const acceptedNoMatch = error && opts.acceptExitCodeOne === true && error.code === 1;
-                    if ((error && !acceptedNoMatch) || typeof stdout !== "string") {
-                        resolve(null);
-                        return;
-                    }
-                    const output = stdout.replace(/[\r\n]+$/, "");
-                    resolve(exact ? output.trim() : output);
-                });
-            } catch (error) {
-                this.log("warn", "REPOSITORY GIT OPERATION FAILED");
-                resolve(null);
-            }
+        return this.gitExecutor.execute(repositoryPath, args, {
+            configOverrides: opts.configOverrides,
+            timeout: opts.timeout
+        }).then(result => {
+            const acceptedNoMatch = !result.ok && opts.acceptExitCodeOne === true && result.exitCode === 1;
+            if ((!result.ok && !acceptedNoMatch) || typeof result.stdout !== "string") return null;
+            const output = result.stdout.replace(/[\r\n]+$/, "");
+            return exact ? output.trim() : output;
+        }).catch(() => {
+            this.log("warn", "REPOSITORY GIT OPERATION FAILED");
+            return null;
         });
     }
 }
@@ -413,6 +433,13 @@ class RepositoryActionService {
         });
         this.processManager = opts.processManager || new RepositoryProcessManager({
             home: this.repositoryService.home
+        });
+        this.gitService = opts.gitService || new RepositoryGitService({
+            repositoryService: this.repositoryService,
+            cloneTimeoutMs: opts.cloneTimeoutMs,
+            updateTimeoutMs: opts.updateTimeoutMs,
+            onState: opts.onGitState,
+            log: opts.log
         });
         this.shell = opts.shell || "bash";
         this.writeTerminal = typeof opts.writeTerminal === "function" ? opts.writeTerminal : null;
@@ -432,6 +459,7 @@ class RepositoryActionService {
         ));
         this.registerAction(REPOSITORY_ACTIONS[4], context => this._run(context), () => true);
         this.registerAction(REPOSITORY_ACTIONS[5], context => this._stop(context), () => true);
+        this.registerAction(REPOSITORY_ACTIONS[6], context => this._pull(context), () => true);
     }
 
     registerAction(definition, handler, isAvailable = () => true) {
@@ -484,7 +512,7 @@ class RepositoryActionService {
             return {
                 ok: false,
                 status: error instanceof RepositoryError || error instanceof RepositoryRunError
-                    || error instanceof RepositoryProcessError
+                    || error instanceof RepositoryProcessError || error instanceof RepositoryGitError
                     ? error.status : "REPOSITORY ACTION FAILED"
             };
         }
@@ -501,6 +529,10 @@ class RepositoryActionService {
         const runInspection = internal
             ? this.runProfileService.inspect(internal)
             : {candidates: [], trustStoreStatus: null};
+        let pullCapability = {ok: false, state: "UNAVAILABLE"};
+        if (internal && this.gitService.isUpdating(repository.id)) {
+            pullCapability = {ok: false, state: "UPDATING"};
+        } else if (internal && !processActive) pullCapability = await this.gitService.inspectUpdate(internal);
         publicRepository.process = processStatus;
         publicRepository.actions = Array.from(this.actions.values()).map(action => {
             let enabled;
@@ -517,6 +549,9 @@ class RepositoryActionService {
             } else if (action.definition.id === "stop") {
                 enabled = processActive && processStatus.state !== "STOPPING";
                 state = processActive ? processStatus.state : "UNAVAILABLE";
+            } else if (action.definition.id === "pull") {
+                enabled = Boolean(internal && !processActive && pullCapability.ok);
+                state = enabled ? "" : (processActive ? "UNAVAILABLE" : pullCapability.state);
             } else {
                 enabled = Boolean(internal && action.isAvailable(internal));
                 if (!enabled) state = "UNAVAILABLE";
@@ -529,6 +564,22 @@ class RepositoryActionService {
             };
         });
         return publicRepository;
+    }
+
+    async clone(repositoryUrl) {
+        const result = await this.gitService.clone(repositoryUrl);
+        if (!result.ok) return result;
+        const internal = this.repositoryService.repositories.get(result.repositoryId);
+        if (!internal) return {ok: false, status: "CLONED REPOSITORY VALIDATION FAILED"};
+        return {
+            ok: true,
+            status: result.status,
+            repository: await this._decorate(this._publicRepository(internal), internal)
+        };
+    }
+
+    cancelClone() {
+        return this.gitService.cancelClone();
     }
 
     _publicRepository(repository) {
@@ -656,6 +707,22 @@ class RepositoryActionService {
         };
     }
 
+    async _pull(context) {
+        const repository = context.repository;
+        if (this.processManager.isActive(repository.id)) {
+            return {ok: false, status: "REPOSITORY PROCESS ACTIVE\nUPDATE ABORTED"};
+        }
+        const result = await this.gitService.pull(repository);
+        if (!result.ok) return result;
+        const refreshed = await this.repositoryService.resolveRepository(repository.id, {refreshMetadata: true});
+        return {
+            ok: true,
+            status: result.status,
+            actionId: "pull",
+            repository: await this._decorate(this._publicRepository(refreshed), refreshed)
+        };
+    }
+
     _profileSelectionPrompt(repository, candidates) {
         return {
             kind: "profile-selection",
@@ -755,6 +822,15 @@ async function handleRepositoryRequest(actions, request) {
         if (Object.keys(request).some(key => key !== "operation")) return {ok: false, status: "INVALID REQUEST"};
         return actions.list();
     }
+    if (request.operation === "clone") {
+        if (Object.keys(request).some(key => !["operation", "repositoryUrl"].includes(key))
+            || typeof request.repositoryUrl !== "string") return {ok: false, status: "INVALID REQUEST"};
+        return actions.clone(request.repositoryUrl);
+    }
+    if (request.operation === "cancel-clone") {
+        if (Object.keys(request).some(key => key !== "operation")) return {ok: false, status: "INVALID REQUEST"};
+        return actions.cancelClone();
+    }
     if (request.operation !== "action") return {ok: false, status: "UNSUPPORTED OPERATION"};
     const allowedKeys = [
         "operation", "repositoryId", "actionId", "geometry",
@@ -799,6 +875,9 @@ module.exports = {
     REPOSITORY_ACTIONS,
     RepositoryActionService,
     RepositoryError,
+    RepositoryGitError,
+    RepositoryGitExecutor,
+    RepositoryGitService,
     RepositoryService,
     expandHome,
     handleRepositoryRequest,

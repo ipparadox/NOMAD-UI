@@ -2,6 +2,7 @@ const readline = require("readline");
 const {ApplicationService} = require("./applicationService.js");
 const {CliError} = require("./errors.js");
 const {InstallService} = require("./installService.js");
+const {RepositoryCliService} = require("./repositoryCliService.js");
 const {
     MAX_LEARNING_TIMEOUT_MS,
     MIN_LEARNING_TIMEOUT_MS,
@@ -12,6 +13,7 @@ const GENERAL_HELP = `NOMAD CLI
 
 USAGE
   nomad app <command> [application]
+  nomad repo <command> [repository]
   nomad install <application> [--apply]
 
 COMMANDS
@@ -22,9 +24,13 @@ COMMANDS
   app remove <application> Remove a user application
   app info <application>   Show sanitized application status
   app reload               Validate the registry and report reload action
+  repo list                List registered repositories
+  repo clone <github-url>  Clone and register a safe GitHub repository
+  repo info <repository>   Show local repository and Git state
+  repo pull <repository>   Fetch and fast-forward a clean repository
   install <application>    Plan a catalog-backed package installation
 
-Run 'nomad app --help' for application command help.`;
+Run 'nomad app --help' or 'nomad repo --help' for command help.`;
 
 const APP_HELP = `NOMAD APPLICATION MANAGEMENT
 
@@ -38,6 +44,16 @@ USAGE
   nomad app reload
 
 Desktop IDs and friendly identifiers such as spotify or vlc are accepted.`;
+
+const REPO_HELP = `NOMAD REPOSITORY MANAGEMENT
+
+USAGE
+  nomad repo list
+  nomad repo clone <github-url>
+  nomad repo info <repository>
+  nomad repo pull <repository>
+
+Only validated GitHub repository URLs and safe fast-forward updates are supported.`;
 
 function table(headers, rows) {
     const widths = headers.map((header, column) => rows.reduce((width, row) => {
@@ -116,6 +132,7 @@ async function runCli(argv, opts = {}) {
     const writeError = line => stderr.write(`${line}\n`);
     let applicationService;
     let installService;
+    let repositoryCliService;
     let windowClassLearningService;
 
     const applications = () => {
@@ -135,6 +152,10 @@ async function runCli(argv, opts = {}) {
             }));
         }
         return windowClassLearningService;
+    };
+    const repositories = () => {
+        if (!repositoryCliService) repositoryCliService = opts.repositoryCliService || new RepositoryCliService(opts);
+        return repositoryCliService;
     };
 
     try {
@@ -252,6 +273,68 @@ async function runCli(argv, opts = {}) {
             throw new CliError(`UNKNOWN APP COMMAND: ${command}\nRun 'nomad app --help'.`, 2);
         }
 
+        if (argv[0] === "repo") {
+            if (argv.length === 1 || (argv.length === 2 && ["--help", "-h", "help"].includes(argv[1]))) {
+                write(REPO_HELP);
+                return 0;
+            }
+            const command = argv[1];
+
+            if (command === "list") {
+                if (argv.length !== 2) throw new CliError("USAGE: nomad repo list", 2);
+                const result = await repositories().list();
+                write("NOMAD REPOSITORIES");
+                if (!result.repositories.length) {
+                    write("");
+                    write(result.status || "NO REPOSITORIES DETECTED");
+                    return 0;
+                }
+                write("");
+                write(table(["NAME", "BRANCH", "STATUS", "PULL"], result.repositories.map(repository => [
+                    repository.displayName,
+                    repository.branch,
+                    repository.status,
+                    repository.pullState
+                ])));
+                return 0;
+            }
+
+            if (command === "clone") {
+                if (argv.length !== 3) throw new CliError("USAGE: nomad repo clone <github-url>", 2);
+                const result = await repositories().clone(argv[2]);
+                if (!result || !result.ok) throw new CliError(result && result.status ? result.status : "CLONE FAILED", 1);
+                write(result.status);
+                return 0;
+            }
+
+            if (command === "info") {
+                if (argv.length !== 3) throw new CliError("USAGE: nomad repo info <repository>", 2);
+                const repository = await repositories().info(argv[2]);
+                write("NOMAD REPOSITORY INFORMATION");
+                write("");
+                write(`ID: ${repository.id}`);
+                write(`NAME: ${repository.displayName}`);
+                write(`BRANCH: ${repository.branch}`);
+                write(`STATUS: ${repository.status}`);
+                write(`REMOTE: ${repository.remote}`);
+                write(`UPSTREAM: ${repository.upstream}`);
+                write(`AHEAD: ${repository.ahead === null ? "UNKNOWN" : repository.ahead}`);
+                write(`BEHIND: ${repository.behind === null ? "UNKNOWN" : repository.behind}`);
+                write(`PULL: ${repository.pullState}`);
+                return 0;
+            }
+
+            if (command === "pull") {
+                if (argv.length !== 3) throw new CliError("USAGE: nomad repo pull <repository>", 2);
+                const result = await repositories().pull(argv[2]);
+                if (!result || !result.ok) throw new CliError(result && result.status ? result.status : "UPDATE FAILED", 1);
+                write(result.status);
+                return 0;
+            }
+
+            throw new CliError(`UNKNOWN REPO COMMAND: ${command}\nRun 'nomad repo --help'.`, 2);
+        }
+
         if (argv[0] === "install") {
             const apply = argv.includes("--apply");
             const operands = argv.slice(1).filter(argument => argument !== "--apply");
@@ -297,4 +380,4 @@ async function runCli(argv, opts = {}) {
     }
 }
 
-module.exports = {APP_HELP, GENERAL_HELP, runCli};
+module.exports = {APP_HELP, GENERAL_HELP, REPO_HELP, runCli};

@@ -6,8 +6,16 @@ class RepositoryLauncher {
             ? this.document.getElementById(opts.container)
             : (opts.container || null);
         this.folderIcon = opts.folderIcon || null;
+        this.addTrigger = typeof opts.addTrigger === "string" && this.document
+            ? this.document.getElementById(opts.addTrigger)
+            : (opts.addTrigger || null);
         this.loadRepositories = typeof opts.loadRepositories === "function" ? opts.loadRepositories : (async () => ({repositories: []}));
         this.onaction = typeof opts.onaction === "function" ? opts.onaction : (async () => ({ok: false, status: "ACTION UNAVAILABLE"}));
+        this.onclone = typeof opts.onclone === "function" ? opts.onclone : (async () => ({ok: false, status: "CLONE UNAVAILABLE"}));
+        this.oncancelclone = typeof opts.oncancelclone === "function"
+            ? opts.oncancelclone : (async () => ({ok: false, status: "NO CLONE IN PROGRESS"}));
+        this.onInputCaptureChange = typeof opts.onInputCaptureChange === "function"
+            ? opts.onInputCaptureChange : (() => {});
         this.getActiveId = typeof opts.getActiveId === "function" ? opts.getActiveId : (() => null);
         this.onResume = typeof opts.onResume === "function" ? opts.onResume : (() => false);
         this.repositories = [];
@@ -19,14 +27,30 @@ class RepositoryLauncher {
         this.view = "actions";
         this.info = null;
         this.prompt = null;
+        this.repositoryUrl = "";
+        this.cloneResult = "";
+        this.cloneCancellationRequested = false;
         this.errorMessage = "";
         this.busy = false;
+        this.inputCaptureActive = false;
         this.previousActiveId = null;
         this.element = null;
         this.entryElements = new Map();
         this._onKeydown = event => this._handleKeydown(event);
         this._onResize = () => this._position();
-        if (this.document) this._mount();
+        this._onAddClick = () => this.openAdd();
+        this._onAddKeydown = event => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            this.openAdd();
+        };
+        if (this.document) {
+            this._mount();
+            if (this.addTrigger) {
+                this.addTrigger.addEventListener("click", this._onAddClick);
+                this.addTrigger.addEventListener("keydown", this._onAddKeydown);
+            }
+        }
     }
 
     async render() {
@@ -59,9 +83,11 @@ class RepositoryLauncher {
     }
 
     selectRepository(repositoryId) {
+        if (this.isOpen && this.busy) return false;
         const repository = this.repositories.find(item => item.id === repositoryId);
         if (!repository) return false;
         if (!this.isOpen) this.previousActiveId = this.getActiveId();
+        this._setInputCapture(false);
         this.selectedRepositoryId = repository.id;
         this.selectedActionIndex = 0;
         this.view = "actions";
@@ -84,19 +110,82 @@ class RepositoryLauncher {
         return true;
     }
 
+    openAdd() {
+        if (this.busy) return false;
+        if (this.isOpen) this.close({restoreFocus: false, resume: false});
+        this.previousActiveId = this.getActiveId();
+        this.selectedRepositoryId = null;
+        this.selectedChoiceIndex = 0;
+        this.view = "add";
+        this.info = null;
+        this.prompt = null;
+        this.repositoryUrl = "";
+        this.cloneResult = "";
+        this.cloneCancellationRequested = false;
+        this.errorMessage = "";
+        this.busy = false;
+        this.isOpen = true;
+        this._setInputCapture(true);
+        this._renderMenu();
+        if (this.element) {
+            this.element.hidden = false;
+            this.element.style.visibility = "hidden";
+            this.document.addEventListener("keydown", this._onKeydown, true);
+            if (this.hostWindow) this.hostWindow.addEventListener("resize", this._onResize);
+            this._position();
+            this.element.style.visibility = "";
+            if (this.cloneInputElement) this.cloneInputElement.focus({preventScroll: true});
+            else this.element.focus({preventScroll: true});
+        }
+        return true;
+    }
+
+    setRepositoryUrl(value) {
+        this.repositoryUrl = typeof value === "string" ? value.slice(0, 512) : "";
+        if (this.cloneInputElement) this.cloneInputElement.value = this.repositoryUrl;
+        return this.repositoryUrl;
+    }
+
+    updateGitState(state) {
+        if (!state || typeof state !== "object" || Array.isArray(state)) return false;
+        if (state.operation === "clone" && this.isOpen && this.view === "add" && this.busy) {
+            const progress = typeof state.progress === "string" ? state.progress.slice(0, 160) : "";
+            this.errorMessage = progress || (state.state === "CLONING" ? "CLONING" : "");
+            this._renderMenu();
+            return true;
+        }
+        if (state.operation === "pull" && state.state === "UPDATING"
+            && typeof state.repositoryId === "string") {
+            const repository = this.repositories.find(item => item.id === state.repositoryId);
+            const pull = repository && repository.actions.find(action => action.id === "pull");
+            if (!pull) return false;
+            pull.enabled = false;
+            pull.state = "UPDATING";
+            if (this.isOpen && this.selectedRepositoryId === repository.id) this._renderMenu();
+            return true;
+        }
+        return false;
+    }
+
     close(opts = {}) {
         if (!this.isOpen) return false;
+        if (this.busy && this.view === "add") return false;
         const selectedId = this.selectedRepositoryId;
+        const wasAdd = this.view === "add" || this.view === "clone-complete";
         const resumeId = this.previousActiveId;
         this.isOpen = false;
         this.selectedRepositoryId = null;
         this.view = "actions";
         this.info = null;
         this.prompt = null;
+        this.repositoryUrl = "";
+        this.cloneResult = "";
+        this.cloneCancellationRequested = false;
         this.selectedChoiceIndex = 0;
         this.errorMessage = "";
         this.busy = false;
         this.previousActiveId = null;
+        this._setInputCapture(false);
         if (this.element) {
             this.element.hidden = true;
             this.document.removeEventListener("keydown", this._onKeydown, true);
@@ -104,7 +193,7 @@ class RepositoryLauncher {
         }
         const resumed = opts.resume !== false && resumeId ? this.onResume(resumeId) === true : false;
         if (opts.restoreFocus !== false && !resumed) {
-            const entry = this.entryElements.get(selectedId);
+            const entry = wasAdd ? this.addTrigger : this.entryElements.get(selectedId);
             if (entry && typeof entry.focus === "function") entry.focus({preventScroll: true});
         }
         return true;
@@ -142,6 +231,7 @@ class RepositoryLauncher {
                 this.close({restoreFocus: false});
                 await this.refresh();
             } else {
+                if (action.id === "pull") await this.refresh();
                 if (this.view === "prompt") {
                     this.view = "actions";
                     this.prompt = null;
@@ -185,7 +275,7 @@ class RepositoryLauncher {
             return true;
         }
 
-        if ((action.id === "run" || action.id === "stop") && updatedRepository) {
+        if ((action.id === "run" || action.id === "stop" || action.id === "pull") && updatedRepository) {
             this.prompt = null;
             this.view = "actions";
             this._renderMenu();
@@ -226,8 +316,86 @@ class RepositoryLauncher {
         });
     }
 
+    _cloneChoices() {
+        return [
+            {id: "clone", label: "CLONE", enabled: !this.busy, state: this.busy ? "CLONING" : ""},
+            {
+                id: "cancel",
+                label: "CANCEL",
+                enabled: true,
+                state: this.busy ? (this.cloneCancellationRequested ? "STOPPING" : "STOP CLONE") : ""
+            }
+        ];
+    }
+
+    activateAddChoice() {
+        if (!this.isOpen || this.view !== "add") return Promise.resolve(false);
+        const choice = this._cloneChoices()[this.selectedChoiceIndex];
+        if (!choice) return Promise.resolve(false);
+        if (choice.id === "cancel") {
+            if (this.busy) return this._cancelClone();
+            this.close();
+            return Promise.resolve(true);
+        }
+        return this._cloneRepository();
+    }
+
+    async _cloneRepository() {
+        if (!this.isOpen || this.view !== "add" || this.busy) return false;
+        const candidate = this.cloneInputElement ? this.cloneInputElement.value : this.repositoryUrl;
+        this.repositoryUrl = typeof candidate === "string" ? candidate.slice(0, 512) : "";
+        if (!this.repositoryUrl.trim()) {
+            this._showError("GITHUB URL REQUIRED");
+            return false;
+        }
+        this.busy = true;
+        this.cloneCancellationRequested = false;
+        this.errorMessage = "";
+        this._renderMenu();
+        let result;
+        try {
+            result = await this.onclone(this.repositoryUrl);
+        } catch (error) {
+            result = {ok: false, status: "CLONE FAILED"};
+        }
+        this.busy = false;
+        this.cloneCancellationRequested = false;
+        if (!result || !result.ok) {
+            this._showError(result && typeof result.status === "string" ? result.status : "CLONE FAILED");
+            if (this.cloneInputElement) this.cloneInputElement.focus({preventScroll: true});
+            return false;
+        }
+        await this.refresh();
+        this.view = "clone-complete";
+        this.cloneResult = typeof result.status === "string"
+            ? result.status.slice(0, 128) : "CLONE COMPLETE\nREPOSITORY REGISTERED";
+        this.errorMessage = "";
+        this._renderMenu();
+        if (this.element) this.element.focus({preventScroll: true});
+        return true;
+    }
+
+    async _cancelClone() {
+        if (!this.busy || this.cloneCancellationRequested) return false;
+        this.cloneCancellationRequested = true;
+        this._renderMenu();
+        try {
+            await this.oncancelclone();
+        } catch (error) {
+            this.cloneCancellationRequested = false;
+            this._showError("CLONE CANCELLATION FAILED");
+            return false;
+        }
+        return true;
+    }
+
     destroy() {
         this.close({restoreFocus: false, resume: false});
+        this._setInputCapture(false);
+        if (this.addTrigger) {
+            this.addTrigger.removeEventListener("click", this._onAddClick);
+            this.addTrigger.removeEventListener("keydown", this._onAddKeydown);
+        }
         if (this.element) this.element.remove();
         this.entryElements.clear();
     }
@@ -249,6 +417,27 @@ class RepositoryLauncher {
         this.actionListElement.setAttribute("role", "listbox");
         this.promptElement = this.document.createElement("div");
         this.promptElement.className = "repository_action_summary repository_prompt_summary";
+        this.cloneFormElement = this.document.createElement("div");
+        this.cloneFormElement.className = "repository_clone_form";
+        const cloneLabel = this.document.createElement("label");
+        cloneLabel.htmlFor = "repository_clone_url";
+        cloneLabel.textContent = "GITHUB URL:";
+        this.cloneInputElement = this.document.createElement("input");
+        this.cloneInputElement.id = "repository_clone_url";
+        this.cloneInputElement.type = "text";
+        this.cloneInputElement.inputMode = "url";
+        this.cloneInputElement.autocomplete = "off";
+        this.cloneInputElement.spellcheck = false;
+        this.cloneInputElement.placeholder = "https://github.com/owner/repo";
+        this.cloneInputElement.maxLength = 512;
+        this.cloneInputElement.addEventListener("input", () => {
+            this.repositoryUrl = this.cloneInputElement.value.slice(0, 512);
+            this.errorMessage = "";
+        });
+        this.cloneInputElement.addEventListener("change", event => {
+            if (event.detail === "enter") this._cloneRepository();
+        });
+        this.cloneFormElement.append(cloneLabel, this.cloneInputElement);
         this.infoElement = this.document.createElement("dl");
         this.infoElement.className = "repository_info";
         this.errorElement = this.document.createElement("p");
@@ -262,6 +451,7 @@ class RepositoryLauncher {
         this.element.append(
             this.titleElement,
             this.promptElement,
+            this.cloneFormElement,
             this.actionListElement,
             this.infoElement,
             this.errorElement,
@@ -306,6 +496,10 @@ class RepositoryLauncher {
             modifiedFileCount: Number.isSafeInteger(repository.modifiedFileCount) && repository.modifiedFileCount >= 0 ? repository.modifiedFileCount : 0,
             remoteAvailable: repository.remoteAvailable === true,
             remoteProvider: ["GITHUB", "OTHER", "NONE"].includes(repository.remoteProvider) ? repository.remoteProvider : "NONE",
+            remote: typeof repository.remote === "string" ? repository.remote.slice(0, 255) : "NONE",
+            upstream: typeof repository.upstream === "string" ? repository.upstream.slice(0, 255) : "NONE",
+            ahead: Number.isSafeInteger(repository.ahead) && repository.ahead >= 0 ? repository.ahead : null,
+            behind: Number.isSafeInteger(repository.behind) && repository.behind >= 0 ? repository.behind : null,
             repositoryAvailable: repository.repositoryAvailable !== false,
             process: processState,
             actions
@@ -394,22 +588,28 @@ class RepositoryLauncher {
 
     _renderMenu() {
         if (!this.element) return;
+        const repositoryView = ["actions", "prompt", "info"].includes(this.view);
         const repository = this.view === "info" ? this.info : this._selectedRepository();
-        if (!repository) {
+        if (repositoryView && !repository) {
             this.close({restoreFocus: false});
             return;
         }
-        this.titleElement.textContent = this.view === "info" ? "REPOSITORY INFO"
-            : (this.view === "prompt" && this.prompt ? this.prompt.title : repository.displayName);
-        this.actionListElement.hidden = this.view === "info";
-        this.promptElement.hidden = this.view !== "prompt";
+        this.titleElement.textContent = this.view === "add" ? "ADD REPOSITORY"
+            : (this.view === "clone-complete" ? "CLONE COMPLETE"
+                : (this.view === "info" ? "REPOSITORY INFO"
+                    : (this.view === "prompt" && this.prompt ? this.prompt.title : repository.displayName)));
+        this.actionListElement.hidden = this.view === "info" || this.view === "clone-complete";
+        this.promptElement.hidden = this.view !== "prompt" && this.view !== "clone-complete";
+        this.cloneFormElement.hidden = this.view !== "add";
         this.infoElement.hidden = this.view !== "info";
         this.summaryElement.hidden = this.view !== "actions";
-        this.footerElement.textContent = this.view === "info"
+        this.footerElement.textContent = this.view === "info" || this.view === "clone-complete"
             ? "ESC CLOSE"
             : (this.view === "prompt"
                 ? "UP/DOWN SELECT  //  ENTER CONFIRM  //  ESC CANCEL"
-                : "UP/DOWN SELECT  //  ENTER OPEN  //  ESC CLOSE");
+                : (this.view === "add"
+                    ? "ENTER CLONE  //  ESC CANCEL"
+                    : "UP/DOWN SELECT  //  ENTER OPEN  //  ESC CLOSE"));
 
         if (this.view === "actions") {
             this._renderList(repository.actions, "action", this.selectedActionIndex,
@@ -421,10 +621,18 @@ class RepositoryLauncher {
                 index => this._selectChoice(index), () => this.activateChoice());
             this._selectChoice(this.selectedChoiceIndex);
             this._renderPrompt(this.prompt);
+        } else if (this.view === "add") {
+            const choices = this._cloneChoices();
+            this._renderList(choices, "choice", this.selectedChoiceIndex,
+                index => this._selectChoice(index), () => this.activateAddChoice());
+            this._selectChoice(this.selectedChoiceIndex);
+        } else if (this.view === "clone-complete") {
+            this._renderCloneComplete();
         } else {
             this._renderInfo(repository);
         }
-        this.errorElement.textContent = this.errorMessage || (this.busy ? "ACTION IN PROGRESS" : "");
+        this.errorElement.textContent = this.errorMessage || (this.busy
+            ? (this.view === "add" ? "CLONING" : "ACTION IN PROGRESS") : "");
         this.errorElement.hidden = !this.errorElement.textContent;
         if (this.isOpen) this._position();
     }
@@ -453,6 +661,14 @@ class RepositoryLauncher {
         }
     }
 
+    _renderCloneComplete() {
+        this.promptElement.replaceChildren();
+        const status = this.document.createElement("p");
+        status.className = "repository_clone_complete";
+        status.textContent = this.cloneResult || "CLONE COMPLETE\nREPOSITORY REGISTERED";
+        this.promptElement.appendChild(status);
+    }
+
     _appendSummaryLine(label, value, container = this.summaryElement) {
         const line = this.document.createElement("p");
         const key = this.document.createElement("span");
@@ -471,7 +687,10 @@ class RepositoryLauncher {
             ["BRANCH", repository.branch],
             ["STATUS", repository.status],
             ["MODIFIED", String(repository.modifiedFileCount)],
-            ["REMOTE", repository.remoteProvider],
+            ["REMOTE", repository.remote],
+            ["UPSTREAM", repository.upstream],
+            ["AHEAD", repository.ahead === null ? "UNKNOWN" : String(repository.ahead)],
+            ["BEHIND", repository.behind === null ? "UNKNOWN" : String(repository.behind)],
             ["PROCESS", repository.process ? repository.process.state : "STOPPED"]
         ];
         fields.forEach(([label, value]) => {
@@ -536,31 +755,58 @@ class RepositoryLauncher {
     }
 
     _selectChoice(index) {
-        if (!this.prompt || !this.prompt.choices.length) return;
-        this.selectedChoiceIndex = (index + this.prompt.choices.length) % this.prompt.choices.length;
+        const choices = this.view === "add" ? this._cloneChoices() : (this.prompt && this.prompt.choices);
+        if (!choices || !choices.length) return;
+        this.selectedChoiceIndex = (index + choices.length) % choices.length;
         if (!this.actionListElement) return;
         this.actionListElement.querySelectorAll("button").forEach((button, buttonIndex) => {
             button.setAttribute("aria-selected", buttonIndex === this.selectedChoiceIndex ? "true" : "false");
         });
-        const choice = this.prompt.choices[this.selectedChoiceIndex];
+        const choice = choices[this.selectedChoiceIndex];
         if (choice) this.element.setAttribute("aria-activedescendant", `repository_choice_${choice.id}`);
     }
 
     _handleKeydown(event) {
         if (!this.isOpen) return;
         let handled = true;
-        if (event.key === "Escape") this.close();
+        if (this.ownsInputTarget(event.target)) {
+            if (event.key === "Escape") {
+                if (this.busy) this._cancelClone();
+                else this.close();
+            } else if (event.key === "Enter") this._cloneRepository();
+            else return;
+        } else if (this.view === "add" && event.key === "Escape") {
+            if (this.busy) this._cancelClone();
+            else this.close();
+        } else if (this.view === "clone-complete" && (event.key === "Escape" || event.key === "Enter")) this.close();
+        else if (event.key === "Escape") this.close();
         else if (this.view === "actions" && event.key === "ArrowUp") this._selectAction(this.selectedActionIndex - 1);
         else if (this.view === "actions" && event.key === "ArrowDown") this._selectAction(this.selectedActionIndex + 1);
         else if (this.view === "actions" && event.key === "Enter") this.activateSelected();
         else if (this.view === "prompt" && event.key === "ArrowUp") this._selectChoice(this.selectedChoiceIndex - 1);
         else if (this.view === "prompt" && event.key === "ArrowDown") this._selectChoice(this.selectedChoiceIndex + 1);
         else if (this.view === "prompt" && event.key === "Enter") this.activateChoice();
+        else if (this.view === "add" && event.key === "ArrowUp") this._selectChoice(this.selectedChoiceIndex - 1);
+        else if (this.view === "add" && event.key === "ArrowDown") this._selectChoice(this.selectedChoiceIndex + 1);
+        else if (this.view === "add" && event.key === "Enter") this.activateAddChoice();
         else handled = false;
         if (!handled) return;
         event.preventDefault();
         event.stopPropagation();
         if (typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
+    }
+
+    ownsInputTarget(target) {
+        return Boolean(this.isOpen && this.view === "add" && this.cloneInputElement
+            && target === this.cloneInputElement);
+    }
+
+    _setInputCapture(active) {
+        const next = active === true;
+        if (this.inputCaptureActive === next) return false;
+        this.inputCaptureActive = next;
+        this.onInputCaptureChange(next);
+        return true;
     }
 
     _selectedRepository() {
@@ -569,7 +815,8 @@ class RepositoryLauncher {
 
     _position() {
         if (!this.element || !this.hostWindow) return;
-        const entry = this.entryElements.get(this.selectedRepositoryId);
+        const entry = this.view === "add" || this.view === "clone-complete"
+            ? this.addTrigger : this.entryElements.get(this.selectedRepositoryId);
         if (!entry) return;
         const rect = entry.getBoundingClientRect();
         const gap = Math.max(6, Math.round(this.hostWindow.innerHeight * 0.007));

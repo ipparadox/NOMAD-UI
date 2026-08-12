@@ -143,7 +143,7 @@ async function run() {
         const listedRepository = actionListing.repositories.find(item => item.id === repository.id);
         assert.deepStrictEqual(listedRepository.actions.map(action => [action.id, action.enabled]), [
             ["code", true], ["terminal", true], ["info", true], ["github", true],
-            ["run", false], ["stop", false]
+            ["run", false], ["stop", false], ["pull", false]
         ]);
         assert(!Object.prototype.hasOwnProperty.call(listedRepository, "githubUrl"));
         assert(!JSON.stringify(actionListing).includes(temporaryRoot));

@@ -4,6 +4,7 @@ const {app, BrowserWindow, dialog, shell} = require("electron");
 process.on("uncaughtException", e => {
     signale.fatal(e);
     dialog.showErrorBox("eDEX-UI crashed", e.message || "Cannot retrieve error message.");
+    if (repositoryGitService && repositoryGitService.hasActiveClone()) repositoryGitService.cancelClone(true);
     if (repositoryProcessManager) repositoryProcessManager.terminateAll();
     if (tty) {
         tty.close();
@@ -48,6 +49,7 @@ const {
 } = require("./classes/applicationRegistry.js");
 const {
     RepositoryActionService,
+    RepositoryGitService,
     RepositoryService,
     handleRepositoryRequest
 } = require("./classes/repositoryService.js");
@@ -58,7 +60,7 @@ ipc.on("log", (e, type, content) => {
     signale[type](content);
 });
 
-var win, tty, extraTtys, i3WindowManager, applicationRegistry, repositoryService, repositoryActions;
+var win, tty, extraTtys, i3WindowManager, applicationRegistry, repositoryService, repositoryActions, repositoryGitService;
 var repositoryRunProfiles, repositoryProcessManager;
 let repositoryShutdownComplete = false;
 let repositoryShutdownPromise = null;
@@ -306,6 +308,13 @@ app.on('ready', async () => {
         log: (level, message) => signale[level](message)
     });
     repositoryRunProfiles = new RepositoryRunProfileService();
+    repositoryGitService = new RepositoryGitService({
+        repositoryService,
+        log: (level, message) => signale[level](message),
+        onState: state => {
+            if (win && !win.isDestroyed()) win.webContents.send("repository-git-state", state);
+        }
+    });
     repositoryProcessManager = new RepositoryProcessManager({
         env: cleanEnv,
         log: (level, message) => signale[level](message),
@@ -315,6 +324,7 @@ app.on('ready', async () => {
     });
     repositoryActions = new RepositoryActionService({
         repositoryService,
+        gitService: repositoryGitService,
         runProfileService: repositoryRunProfiles,
         processManager: repositoryProcessManager,
         shell: settings.shell,
@@ -336,7 +346,7 @@ app.on('ready', async () => {
         }
     });
     ipc.handle("repository-operation", (event, request) => {
-        if (request && (request.operation === "list" || request.operation === "refresh")) {
+        if (request && request.operation !== "cancel-clone") {
             try {
                 const currentSettings = JSON.parse(fs.readFileSync(settingsFile, {encoding: "utf8"}));
                 repositoryService.setRepositoryRoot(currentSettings.repositoryRoot || "~/Repositories");
@@ -458,11 +468,16 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', event => {
-    if (repositoryProcessManager && repositoryProcessManager.hasActive() && !repositoryShutdownComplete) {
+    const hasRepositoryProcesses = repositoryProcessManager && repositoryProcessManager.hasActive();
+    const hasRepositoryClone = repositoryGitService && repositoryGitService.hasActiveClone();
+    if ((hasRepositoryProcesses || hasRepositoryClone) && !repositoryShutdownComplete) {
         event.preventDefault();
         if (!repositoryShutdownPromise) {
-            signale.pending("Stopping managed repository processes...");
-            repositoryShutdownPromise = repositoryProcessManager.stopAll().finally(() => {
+            signale.pending("Stopping managed repository operations...");
+            const stops = [];
+            if (hasRepositoryProcesses) stops.push(repositoryProcessManager.stopAll());
+            if (hasRepositoryClone) stops.push(repositoryGitService.cancelClone(true));
+            repositoryShutdownPromise = Promise.all(stops).finally(() => {
                 repositoryShutdownComplete = true;
                 app.quit();
             });

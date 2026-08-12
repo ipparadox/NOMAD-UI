@@ -34,6 +34,9 @@ function keyEvent(key) {
 async function run() {
     const workspace = {activeSlotId: "browser"};
     const actions = [];
+    const clones = [];
+    let cancelCalls = 0;
+    let finishSlowClone = null;
     const resumed = [];
     const launcher = new RepositoryLauncher({
         loadRepositories: async () => ({ok: true, status: null, repositories: [repository]}),
@@ -55,7 +58,20 @@ async function run() {
                     })
                 };
             }
+            if (actionId === "pull") return {ok: true, actionId, status: "UPDATE COMPLETE", repository};
             return {ok: true, actionId, activateAppId: actionId};
+        },
+        onclone: async repositoryUrl => {
+            clones.push(repositoryUrl);
+            if (repositoryUrl.includes("slow-repository")) {
+                return new Promise(resolve => { finishSlowClone = resolve; });
+            }
+            return {ok: true, status: "CLONE COMPLETE\nREPOSITORY REGISTERED"};
+        },
+        oncancelclone: async () => {
+            cancelCalls++;
+            if (finishSlowClone) finishSlowClone({ok: false, status: "CLONE CANCELLED"});
+            return {ok: true, status: "CLONE CANCELLED"};
         }
     });
 
@@ -109,8 +125,46 @@ async function run() {
     assert.strictEqual(launcher.errorMessage, "ACTION UNAVAILABLE");
     assert.deepStrictEqual(actions, [[repositoryId, "github"], [repositoryId, "info"]], "disabled actions must never cross the renderer callback boundary");
 
+    const pullRepository = Object.assign({}, repository, {
+        remote: "https://github.com/nomad-lab/NOMAD-UI",
+        upstream: "origin/main",
+        ahead: 0,
+        behind: 1,
+        actions: repository.actions.concat([{id: "pull", label: "PULL", enabled: true, state: ""}])
+    });
+    launcher.close();
+    launcher.setRepositories([pullRepository]);
+    launcher.selectRepository(repositoryId);
+    assert.strictEqual(await launcher.activate("pull"), true);
+    assert.strictEqual(launcher.isOpen, true, "PULL completion should remain visible in the repository HUD");
+    assert.strictEqual(actions[actions.length - 1][1], "pull");
+    launcher.close();
+
+    assert.strictEqual(launcher.openAdd(), true);
+    launcher.setRepositoryUrl("git@github.com:owner/new-repository.git");
+    launcher._handleKeydown(keyEvent("Enter"));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepStrictEqual(clones, ["git@github.com:owner/new-repository.git"]);
+    assert.strictEqual(launcher.view, "clone-complete");
+    assert.strictEqual(launcher.cloneResult, "CLONE COMPLETE\nREPOSITORY REGISTERED");
+    launcher._handleKeydown(keyEvent("Escape"));
+    assert.strictEqual(launcher.isOpen, false);
+
+    launcher.openAdd();
+    launcher.setRepositoryUrl("https://github.com/owner/slow-repository");
+    launcher._handleKeydown(keyEvent("Enter"));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.strictEqual(launcher.busy, true);
+    launcher._handleKeydown(keyEvent("Escape"));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.strictEqual(cancelCalls, 1);
+    assert.strictEqual(launcher.busy, false);
+    assert.strictEqual(launcher.errorMessage, "CLONE CANCELLED");
+    launcher._handleKeydown(keyEvent("Escape"));
+    assert.strictEqual(launcher.isOpen, false);
+
     launcher.destroy();
-    console.log("Repository action selection, keyboard navigation, Escape, and disappearance behavior passed");
+    console.log("Repository action selection, PULL, add/clone keyboard workflow, Escape, and disappearance behavior passed");
 }
 
 run().catch(error => {
