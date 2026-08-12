@@ -550,9 +550,23 @@ async function initUI() {
         ipc,
         manager: window.workspaceManager,
         viewport: document.getElementById("workspace_viewport"),
-        log: (level, message) => console[level](`[workspace] ${message}`)
+        log: (level, message) => console[level](`[workspace] ${message}`),
+        onApplicationError: message => {
+            if (window.applicationLauncher) window.applicationLauncher.showError(message);
+        }
     });
     window.i3WorkspaceClient.initialize();
+    window.applicationLauncher = new ApplicationLauncher({
+        manager: window.workspaceManager,
+        trigger: addWorkspaceSlot,
+        onResume: id => {
+            if (id === "terminal" && window.term && window.term[window.currentTerm]) {
+                window.term[window.currentTerm].term.focus();
+                return true;
+            }
+            return window.i3WorkspaceClient.refocus(id);
+        }
+    });
     window.openApplication = id => window.workspaceManager.focus(id);
     window.term = {
         0: new Terminal({

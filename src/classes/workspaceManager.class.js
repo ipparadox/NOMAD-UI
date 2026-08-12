@@ -42,6 +42,31 @@ class WorkspaceManager {
         return application ? {...application} : null;
     }
 
+    getApplicationStates() {
+        return Object.keys(this.applications).map((id, registryIndex) => {
+            const application = this.applications[id];
+            const slot = this.getSlot(id);
+            const available = slot ? slot.available : application.available !== false;
+            let state = slot ? slot.state : "AVAILABLE";
+            if (!available) state = "UNAVAILABLE";
+            else if (state === "CLOSED") state = "AVAILABLE";
+            else if (state !== "LAUNCHING" && this.activeSlotId === id) state = "ACTIVE";
+
+            return {
+                id: application.id,
+                label: application.displayName || application.label || application.id,
+                type: application.type || "internal",
+                launcherOrder: Number.isFinite(application.launcherOrder) ? application.launcherOrder : registryIndex,
+                permanent: application.permanent === true,
+                placeholder: application.placeholder === true,
+                available,
+                running: Boolean(slot && slot.running),
+                state,
+                status: slot ? slot.status : (application.status || "")
+            };
+        });
+    }
+
     setOperationHandler(operation, handler) {
         if (typeof handler !== "function") throw new TypeError("Workspace operation handler must be a function");
         this.operationHandlers[operation] = handler;
@@ -56,7 +81,7 @@ class WorkspaceManager {
 
     focus(id) {
         const slot = this._ensureSlot(id);
-        if (!slot) return false;
+        if (!slot || !slot.available) return false;
         if (!this._runOperation("focus", slot)) return false;
 
         return this._activate(slot, "focus");

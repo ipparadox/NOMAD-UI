@@ -115,5 +115,45 @@ assert.strictEqual(manager.activeSlotId, "terminal");
 assert.strictEqual(manager.getSlot("terminal").active, true);
 assert.strictEqual(operations("focusNomad").length, 1);
 
+// Closing the launcher after an external app had logical ownership can return
+// physical i3 focus without running another WorkspaceManager transition.
+const launcherSent = [];
+const launcherErrors = [];
+const launcherIpc = {
+    on: () => {},
+    send: (event, request) => launcherSent.push([event, request])
+};
+const launcherManager = new WorkspaceManager({applications: MANAGED_APPLICATIONS, initialApplicationIds: ["terminal"]});
+const launcherClient = new I3WorkspaceClient({
+    ipc: launcherIpc,
+    manager: launcherManager,
+    viewport: {},
+    onApplicationError: (message, appId) => launcherErrors.push([message, appId])
+});
+launcherClient.geometry = () => ({x: 10, y: 20, width: 800, height: 600});
+launcherClient.initialize();
+launcherManager.synchronize("code", {state: "ACTIVE", running: true});
+launcherSent.length = 0;
+assert.strictEqual(launcherClient.refocus("code"), true);
+assert.strictEqual(launcherManager.activeSlotId, "code");
+assert.strictEqual(launcherSent[0][1].operation, "focus");
+
+// A failed registry-backed activation falls back safely to TERMINAL and emits
+// only the fixed launcher error vocabulary.
+launcherManager.close("code", {skipOperation: true});
+launcherManager.focus("terminal");
+launcherSent.length = 0;
+launcherManager.focus("code");
+const failedLaunch = launcherSent.find(([, request]) => request.operation === "launch")[1];
+launcherClient._apply({
+    requestId: failedLaunch.requestId,
+    ok: false,
+    appId: "code",
+    status: "APPLICATION NOT FOUND"
+});
+assert.strictEqual(launcherManager.activeSlotId, "terminal");
+assert.strictEqual(launcherManager.getSlot("code"), null);
+assert.deepStrictEqual(launcherErrors, [["APPLICATION NOT FOUND", "code"]]);
+
 delete global.window;
 console.log("I3 workspace logical focus ownership regressions passed");

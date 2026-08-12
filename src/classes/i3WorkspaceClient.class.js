@@ -4,7 +4,9 @@ class I3WorkspaceClient {
         this.manager = opts.manager;
         this.viewport = opts.viewport;
         this.log = opts.log || (() => {});
+        this.onApplicationError = typeof opts.onApplicationError === "function" ? opts.onApplicationError : (() => {});
         this.requestId = 0;
+        this.pendingRequests = {};
         this.activeExternalId = null;
         this._geometryTimer = null;
         this.ipc.on("window-manager-state", (event, result) => this._apply(result));
@@ -19,7 +21,7 @@ class I3WorkspaceClient {
             return true;
         });
         this.manager.setOperationHandler("focus", slot => {
-            if (slot.id === "terminal" || slot.id === "notes") {
+            if (slot.type !== "external") {
                 this.activeExternalId = null;
                 this._send("focusNomad", slot.id);
             } else if (slot.type === "external") {
@@ -74,12 +76,24 @@ class I3WorkspaceClient {
         }, 100);
     }
 
+    refocus(id) {
+        const slot = this.manager.getSlot(id);
+        if (!slot || slot.type !== "external" || !slot.running) return false;
+        this.activeExternalId = id;
+        this._send("focus", id, this.geometry());
+        return true;
+    }
+
     _send(operation, appId, geometry) {
-        this.ipc.send("window-manager-operation", {requestId: ++this.requestId, operation, appId, geometry});
+        const requestId = ++this.requestId;
+        this.pendingRequests[requestId] = {operation, appId};
+        this.ipc.send("window-manager-operation", {requestId, operation, appId, geometry});
     }
 
     _apply(result) {
         if (!result || !result.appId) return;
+        const pending = this.pendingRequests[result.requestId] || null;
+        if (pending) delete this.pendingRequests[result.requestId];
         if (result.appId === "terminal") {
             if (result.status === "WINDOW MANAGER UNAVAILABLE") {
                 Object.keys(this.manager.applications).forEach(id => {
@@ -106,9 +120,16 @@ class I3WorkspaceClient {
             this.manager.update(result.appId, changes);
         }
         if (result.status === "CLOSED") this.manager.close(result.appId, {skipOperation: true});
-        if (!result.ok && result.state !== "RUNNING") {
+        const failed = !result.ok && result.state !== "RUNNING";
+        if (failed) {
             this.manager.close(result.appId, {skipOperation: true});
             this.manager.focus("terminal");
+            if (!pending || ["launch", "focus", "restore"].includes(pending.operation)) {
+                this.onApplicationError(
+                    result.status === "APPLICATION NOT FOUND" ? "APPLICATION NOT FOUND" : "APPLICATION FAILED TO START",
+                    result.appId
+                );
+            }
         }
         if (result.status === "CLOSED") {
             if (this.manager.activeSlotId === result.appId || this.manager.activeSlotId === null) {

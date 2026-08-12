@@ -71,6 +71,11 @@ ul#workspace_slots > li.unavailable {
     color: rgba(var(--color_r), var(--color_g), var(--color_b), 0.35);
 }
 
+ul#workspace_slots > li.workspace_add.launcher_open {
+    color: rgb(var(--color_r), var(--color_g), var(--color_b));
+    background: rgba(var(--color_r), var(--color_g), var(--color_b), 0.12);
+}
+
 div#workspace_viewport {
     position: relative;
     flex: 1 1 auto;
@@ -111,4 +116,137 @@ div.workspace_empty_state::after {
 
 ul#main_shell_tabs {
     display: none;
+}
+
+/*
+ * Managed X11 applications cover the central viewport. The launcher occupies
+ * the adjacent HUD gutter so the active application can remain visible until
+ * the user actually selects a different application.
+ */
+section.application_launcher {
+    position: fixed;
+    z-index: 450;
+    box-sizing: border-box;
+    padding: 1.05vh 0.7vw 0.8vh;
+    color: rgb(var(--color_r), var(--color_g), var(--color_b));
+    background: var(--color_light_black);
+    border-top: 0.092vh solid rgba(var(--color_r), var(--color_g), var(--color_b), 0.72);
+    border-bottom: 0.092vh solid rgba(var(--color_r), var(--color_g), var(--color_b), 0.48);
+    border-left: 0.18vh solid rgb(var(--color_r), var(--color_g), var(--color_b));
+    clip-path: polygon(0 0, calc(100% - 1.1vh) 0, 100% 1.1vh, 100% 100%, 1.1vh 100%, 0 calc(100% - 1.1vh));
+    outline: none;
+    cursor: default;
+}
+
+section.application_launcher[hidden] {
+    display: none;
+}
+
+section.application_launcher::before {
+    content: "NOMAD // APP REGISTRY";
+    display: block;
+    margin-bottom: 0.35vh;
+    color: rgba(var(--color_r), var(--color_g), var(--color_b), 0.38);
+    font-family: var(--font_mono);
+    font-size: 0.72vh;
+    letter-spacing: 0.12em;
+    text-align: right;
+}
+
+section.application_launcher > h2 {
+    margin: 0;
+    padding: 0 0 0.65vh;
+    border-bottom: 0.092vh solid rgba(var(--color_r), var(--color_g), var(--color_b), 0.55);
+    font-family: var(--font_main);
+    font-size: 1.35vh;
+    font-weight: normal;
+    letter-spacing: 0.16em;
+}
+
+ul#application_launcher_list {
+    margin: 0.7vh 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+ul#application_launcher_list > li {
+    margin: 0;
+    padding: 0;
+}
+
+ul#application_launcher_list button {
+    display: grid;
+    grid-template-columns: 1.1em minmax(0, 1fr) auto;
+    gap: 0.35em;
+    align-items: center;
+    width: 100%;
+    margin: 0;
+    padding: 0.58vh 0.35vw;
+    border: 0;
+    border-bottom: 0.092vh solid rgba(var(--color_r), var(--color_g), var(--color_b), 0.16);
+    border-left: 0.092vh solid transparent;
+    border-radius: 0;
+    color: rgba(var(--color_r), var(--color_g), var(--color_b), 0.76);
+    background: transparent;
+    font-family: var(--font_mono);
+    font-size: 1.05vh;
+    text-align: left;
+    cursor: pointer;
+    outline: none;
+}
+
+ul#application_launcher_list button:hover,
+ul#application_launcher_list button[aria-selected="true"] {
+    color: rgb(var(--color_r), var(--color_g), var(--color_b));
+    background: rgba(var(--color_r), var(--color_g), var(--color_b), 0.09);
+    border-left-color: rgb(var(--color_r), var(--color_g), var(--color_b));
+}
+
+.application_launcher_pointer {
+    visibility: hidden;
+}
+
+button[aria-selected="true"] > .application_launcher_pointer {
+    visibility: visible;
+}
+
+.application_launcher_label {
+    overflow: hidden;
+    letter-spacing: 0.08em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.application_launcher_state {
+    color: rgba(var(--color_r), var(--color_g), var(--color_b), 0.44);
+    font-size: 0.78em;
+    letter-spacing: 0.1em;
+}
+
+button[data-state="ACTIVE"] > .application_launcher_state,
+button[data-state="LAUNCHING"] > .application_launcher_state {
+    color: rgba(var(--color_r), var(--color_g), var(--color_b), 0.86);
+}
+
+p.application_launcher_error,
+p.application_launcher_help {
+    margin: 0.75vh 0 0;
+    font-family: var(--font_mono);
+    font-size: 0.72vh;
+    letter-spacing: 0.08em;
+}
+
+p.application_launcher_error {
+    padding-left: 0.4vw;
+    border-left: 0.092vh solid var(--color_red);
+    color: var(--color_red);
+}
+
+p.application_launcher_error[hidden] {
+    display: none;
+}
+
+p.application_launcher_help {
+    color: rgba(var(--color_r), var(--color_g), var(--color_b), 0.42);
+    white-space: nowrap;
 }

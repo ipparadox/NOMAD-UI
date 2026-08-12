@@ -12,25 +12,29 @@ const APPLICATION_STATES = Object.freeze({
     CLOSED: "CLOSED"
 });
 
-// This is the built-in registry. A later V0.4 phase can merge validated user
-// definitions into it without changing WorkspaceManager or the workspace UI.
+// This is the built-in registry. launcherOrder controls its text-list order;
+// a later V0.4 phase can merge validated user definitions into it without
+// changing WorkspaceManager or the workspace UI.
 const MANAGED_APPLICATIONS = Object.freeze([
     Object.freeze({
         id: "terminal",
         displayName: "TERMINAL",
         type: APPLICATION_TYPES.INTERNAL,
-        permanent: true
+        permanent: true,
+        launcherOrder: 3
     }),
     Object.freeze({
         id: "notes",
         displayName: "NOTES",
         type: APPLICATION_TYPES.INTERNAL,
-        placeholder: true
+        placeholder: true,
+        launcherOrder: 2
     }),
     Object.freeze({
         id: "code",
         displayName: "CODE",
         type: APPLICATION_TYPES.EXTERNAL,
+        launcherOrder: 0,
         executable: "code",
         args: Object.freeze([]),
         windowMatch: Object.freeze({instance: "code", className: "code"})
@@ -39,6 +43,7 @@ const MANAGED_APPLICATIONS = Object.freeze([
         id: "browser",
         displayName: "BROWSER",
         type: APPLICATION_TYPES.EXTERNAL,
+        launcherOrder: 1,
         executable: "firefox",
         args: Object.freeze([]),
         windowMatch: Object.freeze({instance: "Navigator", className: "firefox_firefox"})
