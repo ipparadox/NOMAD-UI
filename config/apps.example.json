@@ -1,0 +1,32 @@
+{
+    "version": 1,
+    "applications": [
+        {
+            "id": "spotify",
+            "displayName": "SPOTIFY",
+            "type": "external",
+            "desktopId": "spotify.desktop",
+            "executable": "spotify",
+            "args": [],
+            "wmClass": ["Spotify"],
+            "launcherOrder": 100
+        },
+        {
+            "id": "obsidian",
+            "displayName": "OBSIDIAN",
+            "type": "external",
+            "desktopId": "obsidian.desktop",
+            "wmClass": ["obsidian"],
+            "launcherOrder": 101
+        },
+        {
+            "id": "vlc",
+            "displayName": "VLC",
+            "type": "external",
+            "executable": "vlc",
+            "args": [],
+            "wmClass": ["vlc"],
+            "launcherOrder": 102
+        }
+    ]
+}

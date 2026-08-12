@@ -1,11 +1,66 @@
 const {execFile, spawn} = require("child_process");
-const {APPLICATION_TYPES, MANAGED_APPLICATIONS, applicationMap} = require("./managedApplications.js");
-const APPLICATIONS = Object.freeze(applicationMap(MANAGED_APPLICATIONS.filter(app => app.type === APPLICATION_TYPES.EXTERNAL)));
+const {APPLICATION_TYPES, MANAGED_APPLICATIONS, applicationMap, normalizeApplicationId} = require("./managedApplications.js");
+const WINDOW_MANAGER_OPERATIONS = new Set([
+    "availability", "focusNomad", "launch", "focus", "restore", "minimize",
+    "fullscreen", "unfullscreen", "close", "geometry"
+]);
+const GEOMETRY_OPERATIONS = new Set(["launch", "focus", "restore", "unfullscreen", "geometry"]);
+
+function normalizeGeometry(geometry) {
+    if (!geometry || typeof geometry !== "object" || Array.isArray(geometry)) return null;
+    if (Object.keys(geometry).some(key => !["x", "y", "width", "height"].includes(key))) return null;
+    if (![geometry.x, geometry.y, geometry.width, geometry.height].every(Number.isFinite)) return null;
+    if (Math.abs(geometry.x) > 100000 || Math.abs(geometry.y) > 100000) return null;
+    if (geometry.width <= 0 || geometry.height <= 0 || geometry.width > 100000 || geometry.height > 100000) return null;
+    return {
+        x: geometry.x,
+        y: geometry.y,
+        width: geometry.width,
+        height: geometry.height
+    };
+}
+
+function validateWindowManagerRequest(request) {
+    const invalid = {ok: false, appId: null, status: "INVALID REQUEST"};
+    if (!request || typeof request !== "object" || Array.isArray(request)) return invalid;
+    if (Object.keys(request).some(key => !["requestId", "operation", "appId", "geometry"].includes(key))) return invalid;
+    if (!Number.isSafeInteger(request.requestId) || request.requestId < 0) return invalid;
+    if (!WINDOW_MANAGER_OPERATIONS.has(request.operation)) return Object.assign({}, invalid, {requestId: request.requestId});
+    const appId = normalizeApplicationId(request.appId);
+    if (!appId || appId !== request.appId) return Object.assign({}, invalid, {requestId: request.requestId});
+    const geometry = typeof request.geometry === "undefined" ? null : normalizeGeometry(request.geometry);
+    if ((GEOMETRY_OPERATIONS.has(request.operation) && !geometry) || (typeof request.geometry !== "undefined" && !geometry)) {
+        return Object.assign({}, invalid, {requestId: request.requestId, appId});
+    }
+    return {
+        ok: true,
+        requestId: request.requestId,
+        operation: request.operation,
+        appId,
+        geometry
+    };
+}
+
+async function handleWindowManagerRequest(manager, request) {
+    const validated = validateWindowManagerRequest(request);
+    if (!validated.ok) return validated;
+    if (validated.operation === "availability") {
+        return {
+            ok: manager.available,
+            requestId: validated.requestId,
+            appId: validated.appId,
+            status: manager.available ? "RUNNING" : "WINDOW MANAGER UNAVAILABLE"
+        };
+    }
+    const result = await manager.operate(validated.operation, validated.appId, validated.geometry);
+    return Object.assign({requestId: validated.requestId}, result);
+}
 
 class I3WindowManager {
     constructor(opts = {}) {
         this.log = opts.log || (() => {});
         this.onState = opts.onState || (() => {});
+        this.spawn = opts.spawn || spawn;
         this.windows = {};
         this.windowStates = {};
         this.processes = {};
@@ -13,6 +68,20 @@ class I3WindowManager {
         this.launchErrors = {};
         this.available = false;
         this._monitor = null;
+        this.setApplications(opts.applications || MANAGED_APPLICATIONS);
+    }
+
+    setApplications(applications) {
+        this.applicationDefinitions = applicationMap(applications || []);
+        this.applications = applicationMap((applications || []).filter(application => application.type === APPLICATION_TYPES.EXTERNAL));
+        Object.keys(this.windows).forEach(appId => {
+            if (!this.applications[appId]) {
+                delete this.windows[appId];
+                delete this.windowStates[appId];
+                delete this.processes[appId];
+                delete this.launchErrors[appId];
+            }
+        });
     }
 
     async initialize() {
@@ -37,9 +106,18 @@ class I3WindowManager {
         if (!this.available) return this._result(false, appId, "WINDOW MANAGER UNAVAILABLE");
 
         try {
-            if (operation === "focusNomad") return await this._focusNomad(appId);
-            if (!APPLICATIONS[appId]) return this._result(false, appId, "APPLICATION NOT FOUND");
+            if (operation === "focusNomad") {
+                const target = this.applicationDefinitions[appId];
+                if (!target || target.type !== APPLICATION_TYPES.INTERNAL) return this._result(false, appId, "APPLICATION NOT FOUND");
+                return await this._focusNomad(appId);
+            }
+            const definition = this.applications[appId];
+            if (!definition) return this._result(false, appId, "APPLICATION NOT FOUND");
             if (operation === "launch" || operation === "focus" || operation === "restore") {
+                if (definition.available === false || !definition.executable || !definition.windowMatchers || !definition.windowMatchers.length) {
+                    return this._result(false, appId, "APPLICATION NOT FOUND");
+                }
+                if (!normalizeGeometry(geometry)) return this._result(false, appId, "INVALID GEOMETRY");
                 return await this._show(appId, geometry);
             }
             const windowNode = await this._managedWindow(appId);
@@ -54,6 +132,7 @@ class I3WindowManager {
                 return this._result(true, appId, "RUNNING", {state: "RUNNING", fullscreen: true, minimized: false, containerId: windowNode.id});
             }
             if (operation === "unfullscreen") {
+                if (!normalizeGeometry(geometry)) return this._result(false, appId, "INVALID GEOMETRY");
                 await this._command(windowNode.id, "fullscreen disable, floating enable");
                 await this._place(windowNode.id, geometry, true);
                 return this._result(true, appId, "RUNNING", {state: "RUNNING", fullscreen: false, minimized: false, containerId: windowNode.id});
@@ -63,6 +142,7 @@ class I3WindowManager {
                 return this._result(true, appId, "CLOSED", {state: "CLOSED", running: false, minimized: false, fullscreen: false, containerId: null});
             }
             if (operation === "geometry") {
+                if (!normalizeGeometry(geometry)) return this._result(false, appId, "INVALID GEOMETRY");
                 await this._place(windowNode.id, geometry, false);
                 return this._result(true, appId, "RUNNING");
             }
@@ -98,17 +178,21 @@ class I3WindowManager {
     }
 
     _launch(appId) {
-        const definition = APPLICATIONS[appId];
+        const definition = this.applications[appId];
         try {
             delete this.launchErrors[appId];
-            const child = spawn(definition.executable, definition.args, {detached: true, stdio: "ignore"});
+            const child = this.spawn(definition.executable, definition.args.slice(), {
+                detached: true,
+                stdio: "ignore",
+                shell: false
+            });
             this.processes[appId] = child;
             child.once("error", error => {
                 this.launchErrors[appId] = error;
                 this.log("warn", `${appId} executable failed: ${error.message}`);
             });
             child.once("exit", () => delete this.processes[appId]);
-            child.unref();
+            if (typeof child.unref === "function") child.unref();
             return true;
         } catch (error) {
             return false;
@@ -134,19 +218,24 @@ class I3WindowManager {
         const rememberedId = this.windows[appId];
         const tree = await this._tree();
         let windowNode = rememberedId ? this._walk(tree, node => node.id === rememberedId) : null;
-        if (!windowNode) windowNode = this._walk(tree, node => this._matches(node, APPLICATIONS[appId]));
+        if (!windowNode) windowNode = this._walk(tree, node => this._matches(node, this.applications[appId]));
         if (windowNode) this.windows[appId] = windowNode.id;
         return windowNode;
     }
 
     async _findWindow(appId) {
         const tree = await this._tree();
-        return this._walk(tree, node => this._matches(node, APPLICATIONS[appId]));
+        return this._walk(tree, node => this._matches(node, this.applications[appId]));
     }
 
     _matches(node, definition) {
+        if (!definition || !Array.isArray(definition.windowMatchers)) return false;
         const props = node.window_properties || {};
-        return props.instance === definition.windowMatch.instance && props.class === definition.windowMatch.className;
+        return definition.windowMatchers.some(matcher => {
+            if (matcher.instance && props.instance !== matcher.instance) return false;
+            if (matcher.className && props.class !== matcher.className) return false;
+            return Boolean(matcher.instance || matcher.className);
+        });
     }
 
     _walk(node, predicate) {
@@ -215,8 +304,8 @@ class I3WindowManager {
 
     async _focusNomad(targetAppId) {
         const tree = await this._tree();
-        for (const appId of Object.keys(APPLICATIONS)) {
-            const windowNodes = this._walkAll(tree, node => this._matches(node, APPLICATIONS[appId]));
+        for (const appId of Object.keys(this.applications)) {
+            const windowNodes = this._walkAll(tree, node => this._matches(node, this.applications[appId]));
             for (const windowNode of windowNodes) {
                 const scratchpadState = windowNode.scratchpad_state || "none";
                 this.log("info", `${appId} hide requested: con_id=${windowNode.id} visible=${Boolean(windowNode.visible)} scratchpad_state=${scratchpadState}`);
@@ -251,7 +340,7 @@ class I3WindowManager {
         if (!this.available) return;
         let tree;
         try { tree = await this._tree(); } catch (error) { return; }
-        Object.keys(APPLICATIONS).forEach(appId => {
+        Object.keys(this.applications).forEach(appId => {
             const rememberedId = this.windows[appId];
             const rememberedContext = rememberedId ? this._walkContext(tree, node => node.id === rememberedId) : null;
             if (rememberedId && !rememberedContext) {
@@ -260,7 +349,7 @@ class I3WindowManager {
                 this.onState(this._result(true, appId, "CLOSED", {state: "CLOSED", running: false, minimized: false, fullscreen: false, containerId: null}));
                 return;
             }
-            const context = rememberedContext || this._walkContext(tree, node => this._matches(node, APPLICATIONS[appId]));
+            const context = rememberedContext || this._walkContext(tree, node => this._matches(node, this.applications[appId]));
             if (!context) return;
             const windowNode = context.node;
             const observationState = this._observeWindow(context);
@@ -318,4 +407,10 @@ class I3WindowManager {
     }
 }
 
-module.exports = {I3WindowManager, APPLICATIONS};
+module.exports = {
+    I3WindowManager,
+    WINDOW_MANAGER_OPERATIONS,
+    handleWindowManagerRequest,
+    normalizeGeometry,
+    validateWindowManagerRequest
+};

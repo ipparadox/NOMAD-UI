@@ -490,8 +490,17 @@ async function initUI() {
             </div>
             <div id="workspace_view_notes" class="workspace_view workspace_empty_state">APPLICATION NOT INITIALIZED</div>
         </div>`;
+    let registryApplications = publicApplications(MANAGED_APPLICATIONS);
+    try {
+        const registryState = await ipc.invoke("application-registry-operation", {operation: "get"});
+        if (registryState && registryState.ok && Array.isArray(registryState.applications)) {
+            registryApplications = registryState.applications;
+        }
+    } catch (error) {
+        console.warn("[workspace] application registry unavailable; using built-ins");
+    }
     window.workspaceManager = new WorkspaceManager({
-        applications: MANAGED_APPLICATIONS,
+        applications: registryApplications,
         initialApplicationIds: ["terminal"]
     });
     const workspaceSlots = document.getElementById("workspace_slots");
@@ -567,6 +576,21 @@ async function initUI() {
             return window.i3WorkspaceClient.refocus(id);
         }
     });
+    window.reloadApplicationRegistry = async () => {
+        try {
+            const activeBeforeReload = window.workspaceManager.activeSlotId;
+            const registryState = await ipc.invoke("application-registry-operation", {operation: "reload"});
+            if (!registryState || !registryState.ok || !Array.isArray(registryState.applications)) return false;
+            window.workspaceManager.setApplications(registryState.applications);
+            if (activeBeforeReload && !window.workspaceManager.getApplication(activeBeforeReload)) {
+                window.workspaceManager.focus("terminal");
+            }
+            return true;
+        } catch (error) {
+            console.warn("[workspace] application registry reload failed");
+            return false;
+        }
+    };
     window.openApplication = id => window.workspaceManager.focus(id);
     window.term = {
         0: new Terminal({

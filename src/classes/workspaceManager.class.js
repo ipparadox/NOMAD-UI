@@ -1,7 +1,7 @@
 class WorkspaceManager {
     constructor(opts = {}) {
         this.operationHandlers = {...(opts.operationHandlers || {})};
-        this.applications = {};
+        this.applications = Object.create(null);
         (opts.applications || opts.slots || []).forEach(application => {
             this.applications[application.id] = {...application};
         });
@@ -38,8 +38,48 @@ class WorkspaceManager {
     }
 
     getApplication(id) {
-        const application = this.applications[id];
+        const application = Object.prototype.hasOwnProperty.call(this.applications, id) ? this.applications[id] : null;
         return application ? {...application} : null;
+    }
+
+    setApplications(applications) {
+        const activeBeforeReload = this.activeSlotId;
+        const nextApplications = Object.create(null);
+        (applications || []).forEach(application => {
+            if (!application || typeof application.id !== "string" || Object.prototype.hasOwnProperty.call(nextApplications, application.id)) return;
+            nextApplications[application.id] = {...application};
+        });
+        this.applications = nextApplications;
+        this.slots = this.slots.filter(slot => Object.prototype.hasOwnProperty.call(this.applications, slot.id));
+        this.slots.forEach(slot => {
+            const application = this.applications[slot.id];
+            slot.label = application.displayName || application.label || application.id;
+            slot.type = application.type || "internal";
+            slot.permanent = application.permanent === true;
+            slot.placeholder = application.placeholder === true;
+            slot.available = application.available !== false;
+            if (!slot.available && !slot.running) slot.state = "UNAVAILABLE";
+            slot.status = application.status || slot.status || "";
+        });
+
+        if (activeBeforeReload && !this.getSlot(activeBeforeReload)) {
+            const fallback = this.getSlot("terminal") || this._ensureSlot("terminal") || this.slots[0] || null;
+            this.activeSlotId = fallback ? fallback.id : null;
+            this.slots.forEach(slot => {
+                slot.active = Boolean(fallback && slot.id === fallback.id);
+                slot.inactive = !slot.active;
+                if (slot.active) {
+                    slot.running = true;
+                    slot.minimized = false;
+                    slot.state = "ACTIVE";
+                }
+            });
+            if (fallback) this.slots = [fallback].concat(this.slots.filter(slot => slot.id !== fallback.id));
+        } else if (!activeBeforeReload) {
+            this.activeSlotId = null;
+        }
+        this._emit("registry", this.getSlot(this.activeSlotId));
+        return this.getApplicationStates();
     }
 
     getApplicationStates() {
@@ -73,6 +113,8 @@ class WorkspaceManager {
     }
 
     launch(id) {
+        const application = this.getApplication(id);
+        if (!application || application.available === false) return false;
         const slot = this._ensureSlot(id);
         if (!slot || !slot.available || !this._runOperation("launch", slot)) return false;
         slot.state = slot.type === "external" ? "LAUNCHING" : "RUNNING";
@@ -80,6 +122,8 @@ class WorkspaceManager {
     }
 
     focus(id) {
+        const application = this.getApplication(id);
+        if (!application || application.available === false) return false;
         const slot = this._ensureSlot(id);
         if (!slot || !slot.available) return false;
         if (!this._runOperation("focus", slot)) return false;
@@ -195,7 +239,7 @@ class WorkspaceManager {
 
     _emit(operation, slot) {
         const state = this.getState();
-        this.listeners.forEach(listener => listener(state, operation, {...slot}));
+        this.listeners.forEach(listener => listener(state, operation, slot ? {...slot} : null));
     }
 
     _runOperation(operation, slot, value) {

@@ -37,13 +37,20 @@ const url = require("url");
 const fs = require("fs");
 const which = require("which");
 const Terminal = require("./classes/terminal.class.js").Terminal;
-const I3WindowManager = require("./classes/i3WindowManager.class.js").I3WindowManager;
+const {
+    I3WindowManager,
+    handleWindowManagerRequest
+} = require("./classes/i3WindowManager.class.js");
+const {
+    ApplicationRegistry,
+    handleApplicationRegistryRequest
+} = require("./classes/applicationRegistry.js");
 
 ipc.on("log", (e, type, content) => {
     signale[type](content);
 });
 
-var win, tty, extraTtys, i3WindowManager;
+var win, tty, extraTtys, i3WindowManager, applicationRegistry;
 const settingsFile = path.join(electron.app.getPath("userData"), "settings.json");
 const shortcutsFile = path.join(electron.app.getPath("userData"), "shortcuts.json");
 const lastWindowStateFile = path.join(electron.app.getPath("userData"), "lastWindowState.json");
@@ -228,6 +235,14 @@ function createWindow(settings) {
 }
 
 app.on('ready', async () => {
+    applicationRegistry = new ApplicationRegistry({
+        log: (level, message) => signale[level](message)
+    });
+    applicationRegistry.reload();
+    ipc.handle("application-registry-operation", (event, request) => {
+        return handleApplicationRegistryRequest(applicationRegistry, i3WindowManager, request);
+    });
+
     signale.pending(`Loading settings file...`);
     let settings = require(settingsFile);
     signale.pending(`Resolving shell path...`);
@@ -281,6 +296,7 @@ app.on('ready', async () => {
     createWindow(settings);
 
     i3WindowManager = new I3WindowManager({
+        applications: applicationRegistry.getApplications(),
         log: (level, message) => signale[level](message),
         onState: state => {
             if (win && !win.isDestroyed()) win.webContents.send("window-manager-state", state);
@@ -288,14 +304,8 @@ app.on('ready', async () => {
     });
     await i3WindowManager.initialize();
     ipc.on("window-manager-operation", async (event, request) => {
-        if (!request || typeof request.operation !== "string") return;
-        let result;
-        if (request.operation === "availability") {
-            result = i3WindowManager.available ? {ok: true, appId: "terminal", status: "RUNNING"} : {ok: false, appId: "terminal", status: "WINDOW MANAGER UNAVAILABLE"};
-        } else {
-            result = await i3WindowManager.operate(request.operation, request.appId, request.geometry);
-        }
-        if (!event.sender.isDestroyed()) event.sender.send("window-manager-state", Object.assign({requestId: request.requestId}, result));
+        const result = await handleWindowManagerRequest(i3WindowManager, request);
+        if (!event.sender.isDestroyed()) event.sender.send("window-manager-state", result);
     });
 
     // Support for more terminals, used for creating tabs (currently limited to 4 extra terms)
