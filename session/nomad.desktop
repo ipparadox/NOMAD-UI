@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=NOMAD
+Comment=Start the NOMAD desktop environment
+Exec=/usr/local/bin/nomad-session
+TryExec=/usr/local/bin/nomad-session
+Type=Application
+X-GDM-SessionRegisters=true

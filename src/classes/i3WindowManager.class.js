@@ -20,11 +20,11 @@ class I3WindowManager {
         try {
             await this._i3(["-t", "get_version"]);
             this.available = true;
-            this.log("info", "i3 window integration available");
+            this.log("info", `i3 window integration available (I3SOCK=${process.env.I3SOCK || "not set"})`);
             this._monitor = setInterval(() => this._checkManagedWindows(), 2000);
         } catch (error) {
             this.available = false;
-            this.log("warn", "i3 IPC unavailable");
+            this.log("warn", `i3 IPC unavailable (I3SOCK=${process.env.I3SOCK || "not set"}): ${error.message}`);
         }
         return this.available;
     }
@@ -36,10 +36,10 @@ class I3WindowManager {
 
     async operate(operation, appId, geometry) {
         if (!this.available) return this._result(false, appId, "WINDOW MANAGER UNAVAILABLE");
-        if (operation === "focusNomad") return this._focusNomad();
-        if (!APPLICATIONS[appId]) return this._result(false, appId, "APPLICATION NOT FOUND");
 
         try {
+            if (operation === "focusNomad") return await this._focusNomad(appId);
+            if (!APPLICATIONS[appId]) return this._result(false, appId, "APPLICATION NOT FOUND");
             if (operation === "launch" || operation === "focus" || operation === "restore") {
                 return await this._show(appId, geometry);
             }
@@ -83,6 +83,7 @@ class I3WindowManager {
         }
         if (!windowNode) return this._result(false, appId, "APPLICATION FAILED TO START");
         this.windows[appId] = windowNode.id;
+        this.log("info", `${appId} show requested: con_id=${windowNode.id} scratchpad_state=${windowNode.scratchpad_state || "none"}`);
         if (windowNode.scratchpad_state && windowNode.scratchpad_state !== "none") {
             await this._command(windowNode.id, "scratchpad show");
         }
@@ -166,16 +167,37 @@ class I3WindowManager {
         await this._command(conId, command);
     }
 
-    async _focusNomad() {
+    async _focusNomad(targetAppId) {
+        const tree = await this._tree();
         for (const appId of Object.keys(APPLICATIONS)) {
-            const windowNode = await this._managedWindow(appId);
-            if (windowNode && windowNode.visible) {
-                await this._command(windowNode.id, "move scratchpad").catch(() => {});
+            const windowNodes = this._walkAll(tree, node => this._matches(node, APPLICATIONS[appId]));
+            for (const windowNode of windowNodes) {
+                const scratchpadState = windowNode.scratchpad_state || "none";
+                this.log("info", `${appId} hide requested: con_id=${windowNode.id} visible=${Boolean(windowNode.visible)} scratchpad_state=${scratchpadState}`);
+                if (scratchpadState === "none") {
+                    await this._command(windowNode.id, "move scratchpad");
+                    this.log("info", `${appId} hidden: con_id=${windowNode.id}`);
+                } else {
+                    this.log("info", `${appId} already hidden: con_id=${windowNode.id}`);
+                }
+            }
+            if (windowNodes.length) {
+                this.windows[appId] = windowNodes[0].id;
                 this.onState(this._result(true, appId, "MINIMIZED", {minimized: true, fullscreen: false}));
+            } else {
+                this.log("info", `${appId} hide requested: no managed window found`);
             }
         }
         await this._i3(["[class=\"^eDEX-UI$\" instance=\"^edex-ui$\"] focus"]);
-        return this._result(true, "terminal", "RUNNING");
+        this.log("info", "NOMAD focused after managed applications were hidden");
+        return this._result(true, targetAppId, "RUNNING");
+    }
+
+    _walkAll(node, predicate, matches = []) {
+        if (predicate(node)) matches.push(node);
+        const children = (node.nodes || []).concat(node.floating_nodes || []);
+        children.forEach(child => this._walkAll(child, predicate, matches));
+        return matches;
     }
 
     async _checkManagedWindows() {
