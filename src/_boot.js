@@ -45,12 +45,17 @@ const {
     ApplicationRegistry,
     handleApplicationRegistryRequest
 } = require("./classes/applicationRegistry.js");
+const {
+    RepositoryActionService,
+    RepositoryService,
+    handleRepositoryRequest
+} = require("./classes/repositoryService.js");
 
 ipc.on("log", (e, type, content) => {
     signale[type](content);
 });
 
-var win, tty, extraTtys, i3WindowManager, applicationRegistry;
+var win, tty, extraTtys, i3WindowManager, applicationRegistry, repositoryService, repositoryActions;
 const settingsFile = path.join(electron.app.getPath("userData"), "settings.json");
 const shortcutsFile = path.join(electron.app.getPath("userData"), "shortcuts.json");
 const lastWindowStateFile = path.join(electron.app.getPath("userData"), "lastWindowState.json");
@@ -245,6 +250,7 @@ app.on('ready', async () => {
 
     signale.pending(`Loading settings file...`);
     let settings = require(settingsFile);
+    settings.repositoryRoot = settings.repositoryRoot || "~/Repositories";
     signale.pending(`Resolving shell path...`);
     settings.shell = await which(settings.shell).catch(e => { throw(e) });
     signale.info(`Shell found at ${settings.shell}`);
@@ -288,6 +294,42 @@ app.on('ready', async () => {
         signale.error("Lost connection to frontend");
         signale.watch("Waiting for frontend connection...");
     };
+
+    repositoryService = new RepositoryService({
+        repositoryRoot: settings.repositoryRoot,
+        log: (level, message) => signale[level](message)
+    });
+    repositoryActions = new RepositoryActionService({
+        repositoryService,
+        shell: settings.shell,
+        applicationAvailable: appId => {
+            const application = applicationRegistry.get(appId);
+            return Boolean(application && application.available !== false);
+        },
+        writeTerminal: command => {
+            if (!tty || !tty.tty) throw new Error("Terminal unavailable");
+            tty.tty.write(command+"\r");
+        },
+        openCode: (repositoryPath, geometry) => {
+            if (!i3WindowManager) return {ok: false, appId: "code", status: "WINDOW MANAGER UNAVAILABLE"};
+            return i3WindowManager.openCodeRepository(repositoryPath, geometry);
+        },
+        openBrowser: (githubUrl, geometry) => {
+            if (!i3WindowManager) return {ok: false, appId: "browser", status: "WINDOW MANAGER UNAVAILABLE"};
+            return i3WindowManager.openGithubRepository(githubUrl, geometry);
+        }
+    });
+    ipc.handle("repository-operation", (event, request) => {
+        if (request && (request.operation === "list" || request.operation === "refresh")) {
+            try {
+                const currentSettings = JSON.parse(fs.readFileSync(settingsFile, {encoding: "utf8"}));
+                repositoryService.setRepositoryRoot(currentSettings.repositoryRoot || "~/Repositories");
+            } catch (error) {
+                signale.warn("Repository settings reload failed; retaining the active repository root");
+            }
+        }
+        return handleRepositoryRequest(repositoryActions, request);
+    });
 
     // Support for multithreaded systeminformation calls
     signale.pending("Starting multithreaded calls controller...");

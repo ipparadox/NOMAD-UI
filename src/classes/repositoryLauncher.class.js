@@ -1,101 +1,402 @@
 class RepositoryLauncher {
-    constructor(opts) {
-        if (!opts || !opts.container) throw "Missing options";
-
-        this.container = document.getElementById(opts.container);
-        this.repositoryRoot = opts.repositoryRoot;
-        this.folderIcon = opts.folderIcon;
-        this.onselect = opts.onselect;
+    constructor(opts = {}) {
+        this.document = opts.document || (typeof document !== "undefined" ? document : null);
+        this.hostWindow = opts.window || (typeof window !== "undefined" ? window : null);
+        this.container = typeof opts.container === "string" && this.document
+            ? this.document.getElementById(opts.container)
+            : (opts.container || null);
+        this.folderIcon = opts.folderIcon || null;
+        this.loadRepositories = typeof opts.loadRepositories === "function" ? opts.loadRepositories : (async () => ({repositories: []}));
+        this.onaction = typeof opts.onaction === "function" ? opts.onaction : (async () => ({ok: false, status: "ACTION UNAVAILABLE"}));
+        this.getActiveId = typeof opts.getActiveId === "function" ? opts.getActiveId : (() => null);
+        this.onResume = typeof opts.onResume === "function" ? opts.onResume : (() => false);
+        this.repositories = [];
+        this.status = null;
+        this.isOpen = false;
+        this.selectedRepositoryId = null;
+        this.selectedActionIndex = 0;
+        this.view = "actions";
+        this.info = null;
+        this.errorMessage = "";
+        this.busy = false;
+        this.previousActiveId = null;
+        this.element = null;
+        this.entryElements = new Map();
+        this._onKeydown = event => this._handleKeydown(event);
+        this._onResize = () => this._position();
+        if (this.document) this._mount();
     }
 
-    _expandHome(repositoryRoot) {
-        if (repositoryRoot === "~") return require("os").homedir();
-        if (repositoryRoot.startsWith("~/") || repositoryRoot.startsWith("~\\")) {
-            return require("path").join(require("os").homedir(), repositoryRoot.slice(2));
-        }
-        return repositoryRoot;
+    async render() {
+        return this.refresh();
     }
 
-    _discover() {
-        const fs = require("fs");
-        const path = require("path");
-        const root = path.resolve(this._expandHome(this.repositoryRoot));
-
-        let children;
+    async refresh() {
+        let result;
         try {
-            children = fs.readdirSync(root, {withFileTypes: true});
+            result = await this.loadRepositories();
         } catch (error) {
-            if (error.code === "ENOENT" || error.code === "ENOTDIR") {
-                return {status: "REPOSITORY ROOT NOT FOUND", repositories: []};
-            }
-            throw error;
+            result = {ok: false, status: "REPOSITORY SERVICE UNAVAILABLE", repositories: []};
+        }
+        this.setRepositories(result && Array.isArray(result.repositories) ? result.repositories : [], result && result.status);
+        return Boolean(result && result.ok !== false);
+    }
+
+    setRepositories(repositories, status = null) {
+        const selectedId = this.selectedRepositoryId;
+        this.repositories = (repositories || []).map(repository => this._normalizeRepository(repository)).filter(Boolean);
+        this.status = typeof status === "string" ? status : (this.repositories.length ? null : "NO REPOSITORIES DETECTED");
+        this._renderRepositories();
+
+        if (selectedId && !this.repositories.some(repository => repository.id === selectedId)) {
+            this.close({restoreFocus: false});
+        } else if (this.isOpen) {
+            this._renderMenu();
+        }
+        return this.repositories.slice();
+    }
+
+    selectRepository(repositoryId) {
+        const repository = this.repositories.find(item => item.id === repositoryId);
+        if (!repository) return false;
+        if (!this.isOpen) this.previousActiveId = this.getActiveId();
+        this.selectedRepositoryId = repository.id;
+        this.selectedActionIndex = 0;
+        this.view = "actions";
+        this.info = null;
+        this.errorMessage = "";
+        this.busy = false;
+        this.isOpen = true;
+        this._renderMenu();
+        if (this.element) {
+            this.element.hidden = false;
+            this.element.style.visibility = "hidden";
+            this.document.addEventListener("keydown", this._onKeydown, true);
+            if (this.hostWindow) this.hostWindow.addEventListener("resize", this._onResize);
+            this._position();
+            this.element.style.visibility = "";
+            this.element.focus({preventScroll: true});
+        }
+        return true;
+    }
+
+    close(opts = {}) {
+        if (!this.isOpen) return false;
+        const selectedId = this.selectedRepositoryId;
+        const resumeId = this.previousActiveId;
+        this.isOpen = false;
+        this.selectedRepositoryId = null;
+        this.view = "actions";
+        this.info = null;
+        this.errorMessage = "";
+        this.busy = false;
+        this.previousActiveId = null;
+        if (this.element) {
+            this.element.hidden = true;
+            this.document.removeEventListener("keydown", this._onKeydown, true);
+            if (this.hostWindow) this.hostWindow.removeEventListener("resize", this._onResize);
+        }
+        const resumed = opts.resume !== false && resumeId ? this.onResume(resumeId) === true : false;
+        if (opts.restoreFocus !== false && !resumed) {
+            const entry = this.entryElements.get(selectedId);
+            if (entry && typeof entry.focus === "function") entry.focus({preventScroll: true});
+        }
+        return true;
+    }
+
+    async activate(actionId) {
+        if (!this.isOpen || this.busy || this.view !== "actions") return false;
+        const repository = this._selectedRepository();
+        const action = repository && repository.actions.find(item => item.id === actionId);
+        if (!repository || !action || !action.enabled) {
+            this._showError("ACTION UNAVAILABLE");
+            return false;
         }
 
-        const repositories = children.reduce((results, child) => {
-            const repositoryPath = path.join(root, child.name);
-            try {
-                if (!fs.statSync(repositoryPath).isDirectory()) return results;
-                const gitMetadata = fs.statSync(path.join(repositoryPath, ".git"));
-                if (gitMetadata.isDirectory() || gitMetadata.isFile()) {
-                    results.push({name: child.name, path: repositoryPath});
-                }
-            } catch (error) {
-                if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
-            }
-            return results;
-        }, []);
+        this.busy = true;
+        this.errorMessage = "";
+        this._renderMenu();
+        let result;
+        try {
+            result = await this.onaction(repository.id, action.id);
+        } catch (error) {
+            result = {ok: false, status: "REPOSITORY ACTION FAILED"};
+        }
+        this.busy = false;
 
-        repositories.sort((a, b) => a.name.localeCompare(b.name, undefined, {sensitivity: "base"}));
+        if (!result || !result.ok) {
+            const status = result && typeof result.status === "string" ? result.status : "REPOSITORY ACTION FAILED";
+            if (status === "REPOSITORY NOT FOUND") {
+                this.close({restoreFocus: false});
+                await this.refresh();
+            } else {
+                this._showError(status);
+            }
+            return false;
+        }
+
+        if (action.id === "info" && result.repository) {
+            const info = this._normalizeRepository(result.repository);
+            if (!info) {
+                this._showError("REPOSITORY INFO UNAVAILABLE");
+                return false;
+            }
+            const index = this.repositories.findIndex(item => item.id === info.id);
+            if (index >= 0) this.repositories[index] = info;
+            this.info = info;
+            this.view = "info";
+            this._renderMenu();
+            return true;
+        }
+
+        this.close({restoreFocus: false, resume: false});
+        return true;
+    }
+
+    activateSelected() {
+        const repository = this._selectedRepository();
+        const action = repository && repository.actions[this.selectedActionIndex];
+        return action ? this.activate(action.id) : Promise.resolve(false);
+    }
+
+    destroy() {
+        this.close({restoreFocus: false, resume: false});
+        if (this.element) this.element.remove();
+        this.entryElements.clear();
+    }
+
+    _mount() {
+        this.element = this.document.createElement("section");
+        this.element.id = "repository_actions";
+        this.element.className = "repository_actions";
+        this.element.hidden = true;
+        this.element.tabIndex = -1;
+        this.element.setAttribute("role", "dialog");
+        this.element.setAttribute("aria-modal", "false");
+        this.element.setAttribute("aria-labelledby", "repository_actions_title");
+
+        this.titleElement = this.document.createElement("h2");
+        this.titleElement.id = "repository_actions_title";
+        this.actionListElement = this.document.createElement("ul");
+        this.actionListElement.id = "repository_action_list";
+        this.actionListElement.setAttribute("role", "listbox");
+        this.infoElement = this.document.createElement("dl");
+        this.infoElement.className = "repository_info";
+        this.errorElement = this.document.createElement("p");
+        this.errorElement.className = "repository_action_error";
+        this.errorElement.setAttribute("role", "status");
+        this.summaryElement = this.document.createElement("div");
+        this.summaryElement.className = "repository_action_summary";
+        this.footerElement = this.document.createElement("p");
+        this.footerElement.className = "repository_action_help";
+
+        this.element.append(this.titleElement, this.actionListElement, this.infoElement, this.errorElement, this.summaryElement, this.footerElement);
+        this.document.body.appendChild(this.element);
+    }
+
+    _normalizeRepository(repository) {
+        if (!repository || typeof repository !== "object" || Array.isArray(repository)) return null;
+        if (typeof repository.id !== "string" || !/^repo_[a-f0-9]{32}$/.test(repository.id)) return null;
+        const actions = Array.isArray(repository.actions) ? repository.actions.map(action => {
+            if (!action || typeof action.id !== "string" || !/^[a-z][a-z0-9-]{0,31}$/.test(action.id)) return null;
+            return {
+                id: action.id,
+                label: typeof action.label === "string" ? action.label.slice(0, 32) : action.id.toUpperCase(),
+                enabled: action.enabled === true
+            };
+        }).filter(Boolean) : [];
         return {
-            status: repositories.length === 0 ? "NO REPOSITORIES DETECTED" : null,
-            repositories
+            id: repository.id,
+            displayName: typeof repository.displayName === "string" ? repository.displayName.slice(0, 255) : "REPOSITORY",
+            relativePath: typeof repository.relativePath === "string" ? repository.relativePath.slice(0, 255) : "REPOSITORY",
+            branch: typeof repository.branch === "string" ? repository.branch.slice(0, 160) : "UNKNOWN",
+            dirty: repository.dirty === true,
+            status: repository.status === "MODIFIED" ? "MODIFIED" : "CLEAN",
+            modifiedFileCount: Number.isSafeInteger(repository.modifiedFileCount) && repository.modifiedFileCount >= 0 ? repository.modifiedFileCount : 0,
+            remoteAvailable: repository.remoteAvailable === true,
+            remoteProvider: ["GITHUB", "OTHER", "NONE"].includes(repository.remoteProvider) ? repository.remoteProvider : "NONE",
+            actions
         };
     }
 
-    render() {
-        const result = this._discover();
+    _renderRepositories() {
+        if (!this.container || !this.document) return;
         this.container.replaceChildren();
-
-        if (result.status) {
-            const status = document.createElement("p");
+        this.entryElements.clear();
+        if (!this.repositories.length) {
+            const status = this.document.createElement("p");
             status.className = "repository_status";
-            status.textContent = result.status;
+            status.textContent = this.status || "NO REPOSITORIES DETECTED";
             this.container.appendChild(status);
             return;
         }
 
-        result.repositories.forEach(repository => {
-            const entry = document.createElement("div");
+        this.repositories.forEach(repository => {
+            const entry = this.document.createElement("div");
             entry.className = "repository_entry";
-            entry.title = repository.name;
+            entry.title = repository.displayName;
             entry.tabIndex = 0;
+            entry.dataset.repositoryId = repository.id;
             entry.setAttribute("role", "button");
+            entry.setAttribute("aria-haspopup", "dialog");
+            entry.setAttribute("aria-controls", "repository_actions");
 
-            const icon = this.folderIcon.cloneNode(true);
-            const name = document.createElement("h3");
-            name.textContent = repository.name;
-            entry.append(icon, name);
+            if (this.folderIcon) entry.appendChild(this.folderIcon.cloneNode(true));
+            const name = this.document.createElement("h3");
+            name.textContent = repository.displayName;
+            entry.appendChild(name);
 
-            const select = () => this.onselect(repository.path);
+            const select = () => this.selectRepository(repository.id);
             entry.addEventListener("click", select);
             entry.addEventListener("keydown", event => {
-                if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    select();
-                }
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                event.stopPropagation();
+                select();
             });
+            this.entryElements.set(repository.id, entry);
             this.container.appendChild(entry);
         });
     }
 
-    static terminalCommand(repositoryPath, shell) {
-        const shellName = require("path").basename(shell || "").toLowerCase();
-        const literalPath = `'${repositoryPath.replace(/'/g, "''")}'`;
-        if (shellName === "powershell" || shellName === "powershell.exe" || shellName === "pwsh" || shellName === "pwsh.exe") {
-            return `Set-Location -LiteralPath ${literalPath}`;
+    _renderMenu() {
+        if (!this.element) return;
+        const repository = this.view === "info" ? this.info : this._selectedRepository();
+        if (!repository) {
+            this.close({restoreFocus: false});
+            return;
         }
+        this.titleElement.textContent = this.view === "info" ? "REPOSITORY INFO" : repository.displayName;
+        this.actionListElement.hidden = this.view !== "actions";
+        this.infoElement.hidden = this.view !== "info";
+        this.summaryElement.hidden = this.view !== "actions";
+        this.footerElement.textContent = this.view === "info"
+            ? "ESC CLOSE"
+            : "UP/DOWN SELECT  //  ENTER OPEN  //  ESC CLOSE";
 
-        const posixPath = `'${repositoryPath.replace(/'/g, `'\\''`)}'`;
-        return `cd -- ${posixPath}`;
+        if (this.view === "actions") {
+            this.actionListElement.replaceChildren();
+            repository.actions.forEach((action, index) => {
+                const item = this.document.createElement("li");
+                const button = this.document.createElement("button");
+                const pointer = this.document.createElement("span");
+                const label = this.document.createElement("span");
+                const state = this.document.createElement("span");
+                button.id = `repository_action_${action.id}`;
+                button.type = "button";
+                button.dataset.repositoryAction = action.id;
+                button.setAttribute("role", "option");
+                button.setAttribute("aria-selected", index === this.selectedActionIndex ? "true" : "false");
+                button.setAttribute("aria-disabled", action.enabled ? "false" : "true");
+                button.tabIndex = -1;
+                pointer.className = "repository_action_pointer";
+                pointer.textContent = ">";
+                pointer.setAttribute("aria-hidden", "true");
+                label.className = "repository_action_label";
+                label.textContent = action.label;
+                state.className = "repository_action_state";
+                state.textContent = action.enabled ? "" : "UNAVAILABLE";
+                button.append(pointer, label, state);
+                button.addEventListener("mouseenter", () => this._selectAction(index));
+                button.addEventListener("click", event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    this.selectedActionIndex = index;
+                    this.activate(action.id);
+                });
+                item.appendChild(button);
+                this.actionListElement.appendChild(item);
+            });
+            this._selectAction(this.selectedActionIndex);
+            this._renderSummary(repository);
+        } else {
+            this._renderInfo(repository);
+        }
+        this.errorElement.textContent = this.errorMessage || (this.busy ? "ACTION IN PROGRESS" : "");
+        this.errorElement.hidden = !this.errorElement.textContent;
+        if (this.isOpen) this._position();
+    }
+
+    _renderSummary(repository) {
+        this.summaryElement.replaceChildren();
+        [["BRANCH", repository.branch], ["STATUS", repository.status]].forEach(([label, value]) => {
+            const line = this.document.createElement("p");
+            const key = this.document.createElement("span");
+            const output = this.document.createElement("span");
+            key.textContent = `${label}:`;
+            output.textContent = value;
+            line.append(key, output);
+            this.summaryElement.appendChild(line);
+        });
+    }
+
+    _renderInfo(repository) {
+        this.infoElement.replaceChildren();
+        const fields = [
+            ["NAME", repository.displayName],
+            ["PATH", repository.relativePath],
+            ["BRANCH", repository.branch],
+            ["STATUS", repository.status],
+            ["MODIFIED", String(repository.modifiedFileCount)],
+            ["REMOTE", repository.remoteProvider]
+        ];
+        fields.forEach(([label, value]) => {
+            const term = this.document.createElement("dt");
+            const description = this.document.createElement("dd");
+            term.textContent = label;
+            description.textContent = value;
+            this.infoElement.append(term, description);
+        });
+    }
+
+    _showError(message) {
+        this.errorMessage = typeof message === "string" ? message.slice(0, 96) : "REPOSITORY ACTION FAILED";
+        this._renderMenu();
+    }
+
+    _selectAction(index) {
+        const repository = this._selectedRepository();
+        if (!repository || !repository.actions.length) return;
+        this.selectedActionIndex = (index + repository.actions.length) % repository.actions.length;
+        if (!this.actionListElement) return;
+        this.actionListElement.querySelectorAll("button").forEach((button, buttonIndex) => {
+            button.setAttribute("aria-selected", buttonIndex === this.selectedActionIndex ? "true" : "false");
+        });
+        const action = repository.actions[this.selectedActionIndex];
+        if (action) this.element.setAttribute("aria-activedescendant", `repository_action_${action.id}`);
+    }
+
+    _handleKeydown(event) {
+        if (!this.isOpen) return;
+        let handled = true;
+        if (event.key === "Escape") this.close();
+        else if (this.view === "actions" && event.key === "ArrowUp") this._selectAction(this.selectedActionIndex - 1);
+        else if (this.view === "actions" && event.key === "ArrowDown") this._selectAction(this.selectedActionIndex + 1);
+        else if (this.view === "actions" && event.key === "Enter") this.activateSelected();
+        else handled = false;
+        if (!handled) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
+    }
+
+    _selectedRepository() {
+        return this.repositories.find(repository => repository.id === this.selectedRepositoryId) || null;
+    }
+
+    _position() {
+        if (!this.element || !this.hostWindow) return;
+        const entry = this.entryElements.get(this.selectedRepositoryId);
+        if (!entry) return;
+        const rect = entry.getBoundingClientRect();
+        const gap = Math.max(6, Math.round(this.hostWindow.innerHeight * 0.007));
+        const width = Math.max(230, Math.min(330, Math.round(this.hostWindow.innerWidth * 0.17)));
+        const left = Math.min(Math.max(gap, rect.left), this.hostWindow.innerWidth - width - gap);
+        const top = Math.max(gap, rect.top - this.element.offsetHeight - gap);
+        this.element.style.width = `${Math.floor(width)}px`;
+        this.element.style.left = `${Math.floor(left)}px`;
+        this.element.style.top = `${Math.floor(top)}px`;
     }
 }
+
+if (typeof module !== "undefined" && typeof window === "undefined") module.exports = {RepositoryLauncher};

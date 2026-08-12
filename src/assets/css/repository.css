@@ -71,6 +71,177 @@ div#repository_container > p.repository_status {
     text-align: center;
 }
 
+section.repository_actions {
+    position: fixed;
+    z-index: 460;
+    box-sizing: border-box;
+    padding: 1vh .7vw .75vh;
+    color: rgb(var(--color_r), var(--color_g), var(--color_b));
+    background: var(--color_light_black);
+    border-top: .092vh solid rgba(var(--color_r), var(--color_g), var(--color_b), .72);
+    border-bottom: .092vh solid rgba(var(--color_r), var(--color_g), var(--color_b), .48);
+    border-left: .18vh solid rgb(var(--color_r), var(--color_g), var(--color_b));
+    clip-path: polygon(0 0, calc(100% - 1.1vh) 0, 100% 1.1vh, 100% 100%, 1.1vh 100%, 0 calc(100% - 1.1vh));
+    outline: none;
+    cursor: default;
+}
+
+section.repository_actions[hidden] {
+    display: none;
+}
+
+section.repository_actions::before {
+    content: "NOMAD // REPOSITORY";
+    display: block;
+    margin-bottom: .35vh;
+    color: rgba(var(--color_r), var(--color_g), var(--color_b), .38);
+    font-family: var(--font_mono);
+    font-size: .72vh;
+    letter-spacing: .12em;
+    text-align: right;
+}
+
+section.repository_actions > h2 {
+    overflow: hidden;
+    margin: 0;
+    padding: 0 0 .65vh;
+    border-bottom: .092vh solid rgba(var(--color_r), var(--color_g), var(--color_b), .55);
+    font-family: var(--font_main);
+    font-size: 1.35vh;
+    font-weight: normal;
+    letter-spacing: .12em;
+    text-overflow: ellipsis;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+ul#repository_action_list {
+    margin: .7vh 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+ul#repository_action_list[hidden],
+dl.repository_info[hidden],
+div.repository_action_summary[hidden],
+p.repository_action_error[hidden] {
+    display: none;
+}
+
+ul#repository_action_list button {
+    display: grid;
+    grid-template-columns: 1.1em minmax(0, 1fr) auto;
+    gap: .35em;
+    align-items: center;
+    width: 100%;
+    margin: 0;
+    padding: .54vh .35vw;
+    border: 0;
+    border-bottom: .092vh solid rgba(var(--color_r), var(--color_g), var(--color_b), .16);
+    border-left: .092vh solid transparent;
+    border-radius: 0;
+    color: rgba(var(--color_r), var(--color_g), var(--color_b), .76);
+    background: transparent;
+    font-family: var(--font_mono);
+    font-size: 1.05vh;
+    text-align: left;
+    cursor: pointer;
+    outline: none;
+}
+
+ul#repository_action_list button:hover,
+ul#repository_action_list button[aria-selected="true"] {
+    color: rgb(var(--color_r), var(--color_g), var(--color_b));
+    background: rgba(var(--color_r), var(--color_g), var(--color_b), .09);
+    border-left-color: rgb(var(--color_r), var(--color_g), var(--color_b));
+}
+
+ul#repository_action_list button[aria-disabled="true"] {
+    color: rgba(var(--color_r), var(--color_g), var(--color_b), .3);
+}
+
+.repository_action_pointer {
+    visibility: hidden;
+}
+
+button[aria-selected="true"] > .repository_action_pointer {
+    visibility: visible;
+}
+
+.repository_action_label {
+    overflow: hidden;
+    letter-spacing: .08em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.repository_action_state {
+    font-size: .68em;
+    letter-spacing: .08em;
+}
+
+div.repository_action_summary {
+    margin-top: .72vh;
+    padding-top: .55vh;
+    border-top: .092vh solid rgba(var(--color_r), var(--color_g), var(--color_b), .4);
+    font-family: var(--font_mono);
+    font-size: .82vh;
+    letter-spacing: .07em;
+}
+
+div.repository_action_summary > p {
+    display: grid;
+    grid-template-columns: 4.6em minmax(0, 1fr);
+    gap: .45em;
+    margin: .22vh 0;
+}
+
+div.repository_action_summary > p > span:last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+dl.repository_info {
+    display: grid;
+    grid-template-columns: 5.8em minmax(0, 1fr);
+    gap: .38vh .65vw;
+    margin: .85vh 0 .25vh;
+    font-family: var(--font_mono);
+    font-size: .9vh;
+    letter-spacing: .06em;
+}
+
+dl.repository_info dt {
+    color: rgba(var(--color_r), var(--color_g), var(--color_b), .52);
+}
+
+dl.repository_info dd {
+    overflow: hidden;
+    margin: 0;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+p.repository_action_error,
+p.repository_action_help {
+    margin: .7vh 0 0;
+    font-family: var(--font_mono);
+    font-size: .7vh;
+    letter-spacing: .07em;
+}
+
+p.repository_action_error {
+    padding-left: .4vw;
+    border-left: .092vh solid var(--color_red);
+    color: var(--color_red);
+}
+
+p.repository_action_help {
+    color: rgba(var(--color_r), var(--color_g), var(--color_b), .42);
+    white-space: nowrap;
+}
+
 body.no-virtual-keyboard section#keyboard {
     display: none !important;
 }

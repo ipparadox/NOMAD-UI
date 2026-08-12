@@ -1,5 +1,7 @@
 const {execFile, spawn} = require("child_process");
+const path = require("path");
 const {APPLICATION_TYPES, MANAGED_APPLICATIONS, applicationMap, normalizeApplicationId} = require("./managedApplications.js");
+const {isNormalizedGithubUrl} = require("./repositoryService.js");
 const WINDOW_MANAGER_OPERATIONS = new Set([
     "availability", "focusNomad", "launch", "focus", "restore", "minimize",
     "fullscreen", "unfullscreen", "close", "geometry"
@@ -213,19 +215,60 @@ class I3WindowManager {
         }
     }
 
+    async openCodeRepository(repositoryPath, geometry) {
+        if (typeof repositoryPath !== "string" || !path.isAbsolute(repositoryPath) || repositoryPath.includes("\0")) {
+            return this._result(false, "code", "INVALID REPOSITORY");
+        }
+        return this._openTrustedApplication("code", ["--reuse-window", repositoryPath], geometry);
+    }
+
+    async openGithubRepository(githubUrl, geometry) {
+        if (!isNormalizedGithubUrl(githubUrl)) return this._result(false, "browser", "INVALID URL");
+        return this._openTrustedApplication("browser", [githubUrl], geometry);
+    }
+
+    async _openTrustedApplication(appId, additionalArgs, geometry) {
+        if (!this.available) return this._result(false, appId, "WINDOW MANAGER UNAVAILABLE");
+        const definition = this.applications[appId];
+        if (!definition || definition.available === false || !definition.executable || !definition.windowMatchers || !definition.windowMatchers.length) {
+            return this._result(false, appId, "APPLICATION NOT FOUND");
+        }
+        if (!normalizeGeometry(geometry)) return this._result(false, appId, "INVALID GEOMETRY");
+
+        try {
+            await this._hideManagedApplicationsExcept(appId);
+            const result = await this._showWithLaunchArgs(appId, geometry, additionalArgs);
+            if (result.ok) result.state = "ACTIVE";
+            return result;
+        } catch (error) {
+            this.log("warn", `${appId} trusted context failed: ${error.message}`);
+            return this._result(false, appId, error.code === "ENOENT" ? "APPLICATION NOT FOUND" : "APPLICATION FAILED TO START");
+        }
+    }
+
     async _show(appId, geometry) {
+        return this._showWithLaunchArgs(appId, geometry, null);
+    }
+
+    async _showWithLaunchArgs(appId, geometry, additionalArgs) {
         let windowNode = await this._managedWindow(appId);
+        let launchedWithContext = false;
         if (!windowNode) {
             if (!this.launches[appId]) {
                 this.launches[appId] = (async () => {
-                    const launched = this._launch(appId);
+                    const launched = this._launch(appId, additionalArgs);
                     if (!launched) return null;
                     return this._waitForWindow(appId, 12000);
                 })().finally(() => delete this.launches[appId]);
+                launchedWithContext = Boolean(additionalArgs);
             }
             windowNode = await this.launches[appId];
         }
         if (!windowNode) return this._result(false, appId, "APPLICATION FAILED TO START");
+        if (additionalArgs && !launchedWithContext) {
+            const launched = this._launch(appId, additionalArgs, {trackProcess: false, trackErrors: false});
+            if (!launched) return this._result(false, appId, "APPLICATION FAILED TO START");
+        }
         this.windows[appId] = windowNode.id;
         this.log("info", `${appId} show requested: con_id=${windowNode.id} scratchpad_state=${windowNode.scratchpad_state || "none"}`);
         if (windowNode.scratchpad_state && windowNode.scratchpad_state !== "none") {
@@ -237,25 +280,53 @@ class I3WindowManager {
         return this._result(true, appId, "RUNNING", {state: "RUNNING", running: true, minimized: false, fullscreen: false, containerId: windowNode.id});
     }
 
-    _launch(appId) {
+    _launch(appId, additionalArgs, opts = {}) {
         const definition = this.applications[appId];
         try {
-            delete this.launchErrors[appId];
-            const child = this.spawn(definition.executable, definition.args.slice(), {
+            if (opts.trackErrors !== false) delete this.launchErrors[appId];
+            const args = definition.args.slice().concat(additionalArgs || []);
+            const child = this.spawn(definition.executable, args, {
                 detached: true,
                 stdio: "ignore",
                 shell: false
             });
-            this.processes[appId] = child;
+            if (opts.trackProcess !== false) this.processes[appId] = child;
             child.once("error", error => {
-                this.launchErrors[appId] = error;
+                if (opts.trackErrors !== false) this.launchErrors[appId] = error;
                 this.log("warn", `${appId} executable failed: ${error.message}`);
             });
-            child.once("exit", () => delete this.processes[appId]);
+            child.once("exit", () => {
+                if (this.processes[appId] === child) delete this.processes[appId];
+            });
             if (typeof child.unref === "function") child.unref();
             return true;
         } catch (error) {
             return false;
+        }
+    }
+
+    async _hideManagedApplicationsExcept(targetAppId) {
+        const tree = await this._tree();
+        for (const appId of Object.keys(this.applications)) {
+            if (appId === targetAppId) continue;
+            const windowNodes = this._walkAll(tree, node => this._matches(node, this.applications[appId]));
+            for (const windowNode of windowNodes) {
+                if (!windowNode.scratchpad_state || windowNode.scratchpad_state === "none") {
+                    await this._command(windowNode.id, "move scratchpad");
+                }
+            }
+            if (windowNodes.length) {
+                const containerId = windowNodes[0].id;
+                this.windows[appId] = containerId;
+                this.windowStates[appId] = {focused: false, hidden: true, visible: false};
+                this.onState(this._result(true, appId, "HIDDEN", {
+                    state: "HIDDEN",
+                    running: true,
+                    minimized: true,
+                    fullscreen: false,
+                    containerId
+                }));
+            }
         }
     }
 

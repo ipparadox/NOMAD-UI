@@ -614,7 +614,7 @@ async function initUI() {
     await _delay(100);
 
     document.getElementById("repository").innerHTML = `
-        <h3 class="title"><p>REPOSITORIES</p><p>LAUNCHER</p></h3>
+        <h3 class="title"><p>REPOSITORIES</p><p>ACTIONS</p></h3>
         <div id="repository_container"></div>`;
     const folderIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     folderIcon.setAttribute("viewBox", "0 0 24 24");
@@ -624,16 +624,48 @@ async function initUI() {
     folderIcon.appendChild(folderPath);
     window.repositoryLauncher = new RepositoryLauncher({
         container: "repository_container",
-        repositoryRoot: window.settings.repositoryRoot,
         folderIcon,
-        onselect: repositoryPath => {
-            window.workspaceManager.focus("terminal");
-            window.focusShellTab(0);
-            window.term[0].writelr(RepositoryLauncher.terminalCommand(repositoryPath, window.settings.shell));
-            window.term[0].term.focus();
+        loadRepositories: () => ipc.invoke("repository-operation", {operation: "refresh"}),
+        getActiveId: () => window.workspaceManager.activeSlotId,
+        onResume: id => {
+            if (id === "terminal" && window.term && window.term[window.currentTerm]) {
+                window.term[window.currentTerm].term.focus();
+                return true;
+            }
+            return window.i3WorkspaceClient.refocus(id);
+        },
+        onaction: async (repositoryId, actionId) => {
+            const request = {operation: "action", repositoryId, actionId};
+            if (actionId === "code" || actionId === "github") {
+                request.geometry = window.i3WorkspaceClient.geometry();
+            }
+            const result = await ipc.invoke("repository-operation", request);
+            if (!result || !result.ok) return result;
+
+            if (result.activateAppId === "terminal") {
+                window.workspaceManager.focus("terminal");
+                window.focusShellTab(0);
+                window.term[0].term.focus();
+            } else if (result.application && ["code", "browser"].includes(result.activateAppId)) {
+                const previousId = window.workspaceManager.activeSlotId;
+                const previousSlot = previousId && window.workspaceManager.getSlot(previousId);
+                if (previousSlot && previousSlot.type === "external" && previousId !== result.activateAppId) {
+                    window.workspaceManager.update(previousId, {
+                        state: "HIDDEN",
+                        running: true,
+                        minimized: true,
+                        fullscreen: false,
+                        status: "HIDDEN"
+                    });
+                }
+                window.workspaceManager.synchronize(result.activateAppId, result.application);
+                window.i3WorkspaceClient.activeExternalId = result.activateAppId;
+            }
+            return result;
         }
     });
-    window.repositoryLauncher.render();
+    window.refreshRepositories = () => window.repositoryLauncher.refresh();
+    await window.repositoryLauncher.render();
 
     await _delay(200);
 
