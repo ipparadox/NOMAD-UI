@@ -123,6 +123,8 @@ class I3WindowManager {
         this.log = opts.log || (() => {});
         this.onState = opts.onState || (() => {});
         this.spawn = opts.spawn || spawn;
+        this.environment = opts.env && typeof opts.env === "object" && !Array.isArray(opts.env)
+            ? opts.env : null;
         this.windows = {};
         this.windowStates = {};
         this.processes = {};
@@ -130,6 +132,7 @@ class I3WindowManager {
         this.launchErrors = {};
         this.available = false;
         this._monitor = null;
+        this.applicationPolicy = opts.applicationPolicy || null;
         this.setApplications(opts.applications || MANAGED_APPLICATIONS);
     }
 
@@ -176,6 +179,7 @@ class I3WindowManager {
             const definition = this.applications[appId];
             if (!definition) return this._result(false, appId, "APPLICATION NOT FOUND");
             if (operation === "launch" || operation === "focus" || operation === "restore") {
+                if (!this._applicationAllowed(definition)) return this._result(false, appId, "BLOCKED BY LOCKDOWN");
                 if (definition.available === false || !definition.executable || !definition.windowMatchers || !definition.windowMatchers.length) {
                     return this._result(false, appId, "APPLICATION NOT FOUND");
                 }
@@ -230,6 +234,7 @@ class I3WindowManager {
     async _openTrustedApplication(appId, additionalArgs, geometry) {
         if (!this.available) return this._result(false, appId, "WINDOW MANAGER UNAVAILABLE");
         const definition = this.applications[appId];
+        if (definition && !this._applicationAllowed(definition)) return this._result(false, appId, "BLOCKED BY LOCKDOWN");
         if (!definition || definition.available === false || !definition.executable || !definition.windowMatchers || !definition.windowMatchers.length) {
             return this._result(false, appId, "APPLICATION NOT FOUND");
         }
@@ -285,11 +290,13 @@ class I3WindowManager {
         try {
             if (opts.trackErrors !== false) delete this.launchErrors[appId];
             const args = definition.args.slice().concat(additionalArgs || []);
-            const child = this.spawn(definition.executable, args, {
+            const spawnOptions = {
                 detached: true,
                 stdio: "ignore",
                 shell: false
-            });
+            };
+            if (this.environment) spawnOptions.env = this.environment;
+            const child = this.spawn(definition.executable, args, spawnOptions);
             if (opts.trackProcess !== false) this.processes[appId] = child;
             child.once("error", error => {
                 if (opts.trackErrors !== false) this.launchErrors[appId] = error;
@@ -300,6 +307,38 @@ class I3WindowManager {
             });
             if (typeof child.unref === "function") child.unref();
             return true;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    getRunningExternalCount() {
+        const running = new Set();
+        Object.keys(this.processes).forEach(appId => {
+            if (this.applications[appId]) running.add(appId);
+        });
+        Object.keys(this.windows).forEach(appId => {
+            if (this.applications[appId] && this.windows[appId]) running.add(appId);
+        });
+        Object.keys(this.windowStates).forEach(appId => {
+            const state = this.windowStates[appId];
+            if (this.applications[appId] && state && (state.visible || state.hidden || state.focused)) running.add(appId);
+        });
+        return running.size;
+    }
+
+    getExternalProcessObservation() {
+        return {
+            count: this.getRunningExternalCount(),
+            complete: false,
+            scope: "NOMAD_MANAGED_REGISTRY_ONLY"
+        };
+    }
+
+    _applicationAllowed(definition) {
+        if (!this.applicationPolicy) return true;
+        try {
+            return this.applicationPolicy.evaluate(definition).allowed === true;
         } catch (error) {
             return false;
         }

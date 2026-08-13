@@ -37,7 +37,7 @@ const SECURITY_PROFILES = Object.freeze({
         statePersistence: "EXPLICIT_ONLY",
         applicationExecution: "CONTROLLED_REGISTRY",
         privilegeEscalation: "NOT_EXPOSED",
-        networkPolicy: "OS_POLICY",
+        networkPolicy: "INBOUND_DENY_OUTBOUND_ALLOWED",
         debugExposure: "PRODUCTION_RESTRICTED",
         secrets: "CLOSED_BY_DEFAULT"
     }),
@@ -53,7 +53,7 @@ const SECURITY_PROFILES = Object.freeze({
         statePersistence: "EPHEMERAL",
         applicationExecution: "BUILTIN_ONLY",
         privilegeEscalation: "NOT_EXPOSED",
-        networkPolicy: "RESTRICTED",
+        networkPolicy: "RESTRICTED_OUTBOUND",
         debugExposure: "DISABLED",
         secrets: "CLOSED"
     })

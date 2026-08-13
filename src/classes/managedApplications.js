@@ -56,6 +56,9 @@ const MANAGED_APPLICATIONS = Object.freeze([
 ]);
 
 const PROTECTED_APPLICATION_IDS = Object.freeze(MANAGED_APPLICATIONS.map(application => application.id));
+const LOCKDOWN_BUILTIN_APPLICATION_IDS = Object.freeze(MANAGED_APPLICATIONS
+    .filter(application => application.type === APPLICATION_TYPES.INTERNAL)
+    .map(application => application.id));
 
 function normalizeApplicationId(value) {
     if (typeof value !== "string") return null;
@@ -91,6 +94,7 @@ if (typeof module !== "undefined" && typeof window === "undefined") {
     module.exports = {
         APPLICATION_TYPES,
         APPLICATION_STATES,
+        LOCKDOWN_BUILTIN_APPLICATION_IDS,
         MANAGED_APPLICATIONS,
         PROTECTED_APPLICATION_IDS,
         normalizeApplicationId,

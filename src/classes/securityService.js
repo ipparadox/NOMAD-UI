@@ -9,10 +9,13 @@ const {
 } = require("./securityProfileService.js");
 const {
     RepositoryIsolationService,
-    isSensitiveEnvironmentKey,
-    levelAtLeast,
-    resolveExecutable
+    levelAtLeast
 } = require("./repositoryIsolationService.js");
+const {ApplicationPolicyService} = require("./applicationPolicyService.js");
+const {SecuritySecretsService} = require("./securityEnvironmentService.js");
+const {SecurityFirewallService, resolveTrustedSecurityTool} = require("./securityFirewallService.js");
+const {SecurityIntegrityService} = require("./securityIntegrityService.js");
+const {SecurityPathPolicyService} = require("./securityPathPolicyService.js");
 
 const SECURITY_CHECK_STATES = Object.freeze([
     "SECURE", "PARTIAL", "INSECURE", "UNAVAILABLE", "UNKNOWN", "NOT_APPLICABLE"
@@ -429,7 +432,12 @@ function sanitizeSecurityStatus(status, verbose = false) {
             id: ["NORMAL", "PUBLIC", "LOCKDOWN", "UNKNOWN"].includes(profile.id) ? profile.id : "UNKNOWN",
             source: ["DEFAULT", "CONFIG", "INVALID", "UNKNOWN"].includes(profile.source) ? profile.source : "UNKNOWN",
             compliance: PROFILE_COMPLIANCE_STATES.has(profile.compliance) ? profile.compliance : "UNKNOWN",
-            systemEnforcementPending: profile.systemEnforcementPending === true
+            enforced: ["NORMAL", "PUBLIC", "LOCKDOWN", "NONE", "UNKNOWN"].includes(profile.enforced)
+                ? profile.enforced : "NONE",
+            enforcementState: ["VERIFIED", "PARTIAL", "UNAPPLIED", "NOT_APPLICABLE", "UNKNOWN"].includes(profile.enforcementState)
+                ? profile.enforcementState : "UNKNOWN",
+            systemEnforcementPending: profile.systemEnforcementPending === true,
+            sessionRestartRequired: profile.sessionRestartRequired === true
         },
         checks: Array.isArray(status && status.checks) ? status.checks.map(sanitizeCheck).slice(0, 64) : []
     };
@@ -450,6 +458,35 @@ function sanitizeSecurityStatus(status, verbose = false) {
             })) : []
         };
         if (status && status.hostStorage) output.hostStorage = sanitizeHostStorageInventory(status.hostStorage);
+        const firewall = status && status.firewall ? status.firewall : {};
+        output.firewall = {
+            backend: normalizeFact(firewall.backend, "NONE", 32),
+            available: firewall.available === true,
+            currentState: normalizeFact(firewall.currentState, "UNKNOWN", 32),
+            nomadPolicyState: normalizeFact(firewall.nomadPolicyState, "NOT_APPLIED", 32),
+            verificationResult: normalizeFact(firewall.verificationResult, "UNKNOWN", 32),
+            ipv4: firewall.ipv4 === true,
+            ipv6: firewall.ipv6 === true
+        };
+        const enforcement = status && status.enforcement ? status.enforcement : {};
+        output.enforcement = {
+            enforcedProfile: ["NORMAL", "PUBLIC", "LOCKDOWN", "NONE"].includes(enforcement.enforcedProfile)
+                ? enforcement.enforcedProfile : "NONE",
+            enforcementState: ["VERIFIED", "PARTIAL", "UNAPPLIED", "NOT_APPLICABLE", "UNKNOWN"].includes(enforcement.enforcementState)
+                ? enforcement.enforcementState : "UNKNOWN",
+            systemEnforcementPending: enforcement.systemEnforcementPending === true,
+            sessionRestartRequired: enforcement.sessionRestartRequired === true
+        };
+        const secrets = status && status.secrets ? status.secrets : {};
+        output.environment = {
+            totalCount: Number.isSafeInteger(secrets.totalCount) && secrets.totalCount >= 0 ? secrets.totalCount : 0,
+            allowedCount: Number.isSafeInteger(secrets.allowedCount) && secrets.allowedCount >= 0 ? secrets.allowedCount : 0,
+            excludedCount: Number.isSafeInteger(secrets.excludedCount) && secrets.excludedCount >= 0 ? secrets.excludedCount : 0,
+            sensitiveCount: Number.isSafeInteger(secrets.sensitiveCount) && secrets.sensitiveCount >= 0 ? secrets.sensitiveCount : 0,
+            credentialCount: Number.isSafeInteger(secrets.credentialCount) && secrets.credentialCount >= 0 ? secrets.credentialCount : 0,
+            runtimeInjectionCount: Number.isSafeInteger(secrets.runtimeInjectionCount) && secrets.runtimeInjectionCount >= 0
+                ? secrets.runtimeInjectionCount : 0
+        };
     }
     return output;
 }
@@ -472,8 +509,8 @@ class SecurityService {
             ? opts.commandTimeoutMs : 1500;
         this.commandRunner = typeof opts.commandRunner === "function" ? opts.commandRunner : null;
         this.sources = opts.sources || {};
-        this.resolveExecutable = opts.resolveExecutable || (executable => resolveExecutable(executable, {
-            fs: this.fs, path: this.path, env: this.environment, platform: this.platform
+        this.resolveExecutable = opts.resolveExecutable || (executable => resolveTrustedSecurityTool(executable, {
+            fs: this.fs, path: this.path
         }));
         this.profileService = opts.profileService || new SecurityProfileService(opts);
         this.isolationService = opts.isolationService || new RepositoryIsolationService(opts);
@@ -483,6 +520,8 @@ class SecurityService {
             devTools: this.productionMode ? false : true,
             nodeIntegration: true,
             enableRemoteModule: true,
+            contextIsolation: false,
+            preloadBridge: false,
             experimentalFeatures: false
         }, opts.debugConfiguration || {});
         this.hasActiveRepositoryProcesses = typeof opts.hasActiveRepositoryProcesses === "function"
@@ -494,11 +533,47 @@ class SecurityService {
             && this.path.isAbsolute(this.environment.XDG_STATE_HOME)
             ? this.environment.XDG_STATE_HOME : this.path.join(this.home, ".local", "state");
         this.nomadConfigRoot = opts.nomadConfigRoot || this.path.join(configRoot, "nomad");
+        this.uiConfigRoot = opts.uiConfigRoot || this.path.join(configRoot, "eDEX-UI");
         this.nomadStateRoot = opts.nomadStateRoot || this.path.join(stateRoot, "nomad");
         const configuredRepositoryRoot = opts.repositoryRoot || this.environment.NOMAD_REPOSITORY_ROOT || "~/Repositories";
         this.repositoryRoot = configuredRepositoryRoot === "~" ? this.home
             : (typeof configuredRepositoryRoot === "string" && configuredRepositoryRoot.startsWith("~/")
                 ? this.path.join(this.home, configuredRepositoryRoot.slice(2)) : configuredRepositoryRoot);
+        this.firewallService = opts.firewallService || new SecurityFirewallService({
+            env: this.environment,
+            platform: this.platform,
+            runner: this.commandRunner,
+            spawnSync: this.spawnSync,
+            resolveExecutable: this.resolveExecutable,
+            timeoutMs: this.commandTimeoutMs
+        });
+        this.pathPolicyService = opts.pathPolicyService || new SecurityPathPolicyService({
+            fs: this.fs,
+            path: this.path,
+            os: this.os,
+            env: this.environment,
+            home: this.home,
+            uid: this.uid,
+            sources: this.sources,
+            roots: {configRoot: this.nomadConfigRoot, stateRoot: this.nomadStateRoot}
+        });
+        this.secretsService = opts.secretsService || new SecuritySecretsService({
+            env: this.environment,
+            userFilesAccessible: opts.userCredentialFilesAccessible !== false
+        });
+        this.applicationPolicyService = opts.applicationPolicyService || new ApplicationPolicyService({
+            getSecurityProfile: () => this._profile().profile,
+            getRunningExternalCount: opts.getRunningExternalApplicationCount
+        });
+        this.integrityService = opts.integrityService || new SecurityIntegrityService({
+            fs: this.fs,
+            path: this.path,
+            home: this.home,
+            uid: this.uid,
+            appRoot: opts.appRoot
+        });
+        this.enforcementStatusProvider = typeof opts.enforcementStatusProvider === "function"
+            ? opts.enforcementStatusProvider : null;
     }
 
     status(opts = {}) {
@@ -512,49 +587,69 @@ class SecurityService {
         });
         const encryption = detectEncryption(devices);
         const swap = this._swap();
-        const firewall = this._firewall();
+        const firewall = this.firewallService.check(profileResult.profile);
+        const firewallStatus = firewall.status || this.firewallService.inspect(profileResult.profile);
+        const listeningServices = this.firewallService.listeningCheck(profileResult.profile, firewallStatus);
         const automount = this._automount();
         const secureBoot = this._secureBoot();
         const temp = this._temporaryStorage(mounts);
         const runtime = this._runtimeDirectory(mounts);
         const persistence = this._persistence(mounts);
         const permissions = this._permissions();
-        const sensitiveEnvironment = this._sensitiveEnvironment();
+        const secrets = this.secretsService.observe();
+        const sensitiveEnvironment = {
+            id: "sensitive_environment", label: "SECRETS", state: secrets.state,
+            actual: secrets.actual, detail: secrets.detail
+        };
         const capabilities = this.isolationService.capabilities();
         const execution = profileResult.profile === "UNKNOWN"
             ? this.isolationService.evaluatePolicy("UNKNOWN")
             : this.isolationService.evaluatePolicy(profileResult.profile);
         const debug = this._debugExposure();
         const repositoryRuntime = this._repositoryRuntime();
+        const session = this._sessionCheck();
+        const rendererPrivilege = this._rendererPrivilegeCheck();
+        const application = this.applicationPolicyService.status(profileResult.profile);
+        const ephemeral = profileResult.profile === "UNKNOWN" ? {
+            state: "UNKNOWN", actual: "UNKNOWN", detail: "SECURITY PROFILE UNAVAILABLE",
+            sessionRestartRequired: false, ephemeralActive: false
+        } : this.pathPolicyService.observe(profileResult.profile);
+        const integrity = this.integrityService.audit();
+        const enforcement = this._enforcementStatus(profileResult.profile);
 
         const checks = [
             this._profileCheck(profileResult),
             firewall,
+            listeningServices,
             this._hostStorageCheck(hostStorage),
             automount,
             this._repositoryExecutionCheck(execution, repositoryRuntime),
             this._repositoryIsolationCheck(execution, capabilities),
-            {
-                id: "application_execution", label: "APPLICATION EXECUTION", state: "PARTIAL",
-                actual: "CONTROLLED_REGISTRY",
-                detail: "MAIN PROCESS RESOLVES REGISTERED APPLICATIONS; APPLICATION PROCESSES ARE NOT SANDBOXED"
-            },
+            Object.assign({id: "application_execution", label: "APPLICATION POLICY"}, application),
             this._privilegeEscalationCheck(profileResult.profile),
             this._encryptionCheck(encryption),
             this._swapCheck(swap),
             temp,
             runtime,
             persistence,
+            {
+                id: "ephemeral_state", label: "EPHEMERAL STATE", state: ephemeral.state,
+                actual: ephemeral.actual, detail: ephemeral.detail
+            },
             this._secureBootCheck(secureBoot),
-            this._sessionCheck(),
+            session,
             debug,
-            this._rendererPrivilegeCheck(),
+            rendererPrivilege,
             permissions.config,
             permissions.state,
             permissions.trust,
             permissions.apps,
             permissions.sessionEnv,
-            sensitiveEnvironment
+            sensitiveEnvironment,
+            {
+                id: "integrity", label: "INTEGRITY", state: integrity.state,
+                actual: integrity.actual, detail: integrity.detail
+            }
         ];
         const observations = {
             profile: profileResult,
@@ -564,8 +659,18 @@ class SecurityService {
             temp,
             persistence,
             firewall,
+            firewallStatus,
+            listeningServices,
             debug,
             sensitiveEnvironment,
+            secrets,
+            application,
+            ephemeral,
+            integrity,
+            permissions,
+            session,
+            rendererPrivilege,
+            enforcement,
             capabilities,
             repositoryRuntime
         };
@@ -576,20 +681,29 @@ class SecurityService {
             "host_storage", "automount", "temporary_data", "state_persistence",
             "application_execution", "privilege_escalation", "network_policy"
         ]);
+        const systemEnforcementPending = enforcement.systemEnforcementPending === true
+            || policy.some(item => systemPolicyIds.has(item.id)
+                && item.compliant === false && item.enforceable !== "YES");
         return sanitizeSecurityStatus({
             generatedAt: this.now().toISOString(),
             profile: {
                 id: profileResult.profile,
                 source: profileResult.source,
                 compliance,
-                systemEnforcementPending: policy.some(item => systemPolicyIds.has(item.id)
-                    && item.compliant === false && item.enforceable !== "YES")
+                enforced: enforcement.enforcedProfile,
+                enforcementState: enforcement.enforcementState,
+                sessionRestartRequired: ephemeral.sessionRestartRequired === true
+                    || enforcement.sessionRestartRequired === true,
+                systemEnforcementPending
             },
             checks,
             policy,
             findings,
             capabilities,
-            hostStorage
+            hostStorage,
+            firewall: firewallStatus,
+            enforcement,
+            secrets: secrets.inventory
         }, verbose);
     }
 
@@ -617,7 +731,10 @@ class SecurityService {
             updatedAt: current.updatedAt,
             policy: clone(current.policy),
             compliance: status.profile.compliance,
-            systemEnforcementPending: status.profile.systemEnforcementPending
+            enforced: status.profile.enforced,
+            enforcementState: status.profile.enforcementState,
+            systemEnforcementPending: status.profile.systemEnforcementPending,
+            sessionRestartRequired: status.profile.sessionRestartRequired
         };
     }
 
@@ -635,12 +752,43 @@ class SecurityService {
             updatedAt: changed.updatedAt,
             policy: clone(changed.policy),
             compliance: status.profile.compliance,
-            systemEnforcementPending: status.profile.systemEnforcementPending
+            enforced: status.profile.enforced,
+            enforcementState: status.profile.enforcementState,
+            systemEnforcementPending: status.profile.systemEnforcementPending,
+            sessionRestartRequired: status.profile.sessionRestartRequired
         };
     }
 
     listProfiles() {
         return this.profileService.list();
+    }
+
+    _enforcementStatus(profile) {
+        const fallback = {
+            enforcedProfile: "NONE",
+            enforcementState: profile === "NORMAL" ? "NOT_APPLICABLE" : "UNAPPLIED",
+            systemEnforcementPending: profile === "PUBLIC" || profile === "LOCKDOWN",
+            sessionRestartRequired: false
+        };
+        if (!this.enforcementStatusProvider) return fallback;
+        try {
+            const status = this.enforcementStatusProvider();
+            if (!status || typeof status !== "object" || Array.isArray(status)) return fallback;
+            const enforcedProfile = ["NORMAL", "PUBLIC", "LOCKDOWN", "NONE"].includes(status.enforcedProfile)
+                ? status.enforcedProfile : "NONE";
+            const verified = status.profileGates === true && status.ambiguous !== true
+                && status.systemEnforcementPending !== true;
+            return {
+                enforcedProfile,
+                enforcementState: profile === "NORMAL" && enforcedProfile === "NONE" && verified
+                    ? "NOT_APPLICABLE" : (verified ? "VERIFIED"
+                    : (enforcedProfile === "NONE" ? "UNAPPLIED" : "PARTIAL")),
+                systemEnforcementPending: status.systemEnforcementPending === true,
+                sessionRestartRequired: status.sessionRestartRequired === true
+            };
+        } catch (error) {
+            return Object.assign({}, fallback, {enforcementState: "UNKNOWN", systemEnforcementPending: profile !== "NORMAL"});
+        }
     }
 
     _profile() {
@@ -910,15 +1058,26 @@ class SecurityService {
             {id: "security_profile_store", label: "SECURITY PROFILE STORE", path: this.path.join(this.nomadConfigRoot, "security.json"), type: "file", sensitive: true},
             {id: "session_env", label: "SESSION ENV", path: this.path.join(this.nomadConfigRoot, "session.env"), type: "file", sensitive: true},
             {id: "cli_marker", label: "CLI OWNERSHIP MARKER", path: this.path.join(this.nomadConfigRoot, ".cli-v0.4-d-installed"), type: "file", sensitive: true},
+            {id: "session_marker", label: "SESSION OWNERSHIP MARKER", path: this.path.join(this.nomadConfigRoot, ".session-v0.3-a-installed"), type: "file", sensitive: true},
+            {id: "i3_config", label: "NOMAD I3 CONFIG", path: this.path.join(this.nomadConfigRoot, "i3", "config"), type: "file", sensitive: true},
             {id: "repository_trust_store", label: "REPOSITORY TRUST STORE", path: this.path.join(this.nomadConfigRoot, "repository-runs.json"), type: "file", sensitive: true},
             {id: "application_registry", label: "APPLICATION REGISTRY", path: this.path.join(this.nomadConfigRoot, "apps.json"), type: "file", sensitive: true},
+            {id: "enforcement_state", label: "SECURITY ENFORCEMENT STATE", path: this.path.join(this.nomadConfigRoot, "enforcement-state.json"), type: "file", sensitive: true},
+            {id: "nomad_ui_config_directory", label: "NOMAD UI CONFIG DIRECTORY", path: this.uiConfigRoot, type: "directory", sensitive: false},
+            {id: "settings", label: "NOMAD SETTINGS", path: this.path.join(this.uiConfigRoot, "settings.json"), type: "file", sensitive: true},
+            {id: "shortcuts", label: "NOMAD SHORTCUTS", path: this.path.join(this.uiConfigRoot, "shortcuts.json"), type: "file", sensitive: true},
+            {id: "window_state", label: "NOMAD WINDOW STATE", path: this.path.join(this.uiConfigRoot, "lastWindowState.json"), type: "file", sensitive: true},
+            {id: "version_log", label: "NOMAD VERSION LOG", path: this.path.join(this.uiConfigRoot, "versions_log.json"), type: "file", sensitive: true},
             {id: "nomad_state_directory", label: "NOMAD STATE DIRECTORY", path: this.nomadStateRoot, type: "directory", sensitive: true},
             {id: "session_log", label: "SESSION LOG", path: this.path.join(this.nomadStateRoot, "session.log"), type: "file", sensitive: true},
             {id: "ui_log", label: "UI LOG", path: this.path.join(this.nomadStateRoot, "ui.log"), type: "file", sensitive: true}
         ];
         const details = specs.map(spec => auditPermissionPath(spec, {fs: this.fs, uid: this.uid}));
         const byId = id => details.find(check => check.id === id);
-        const configDetails = ["nomad_config_directory", "security_profile_store", "session_env", "cli_marker"]
+        const configDetails = [
+            "nomad_config_directory", "security_profile_store", "session_env", "cli_marker", "session_marker",
+            "i3_config", "enforcement_state", "nomad_ui_config_directory", "settings", "shortcuts", "window_state", "version_log"
+        ]
             .map(byId).filter(Boolean);
         const stateDetails = ["nomad_state_directory", "session_log", "ui_log"].map(byId).filter(Boolean);
         const sessionEnv = byId("session_env");
@@ -939,13 +1098,10 @@ class SecurityService {
     }
 
     _sensitiveEnvironment() {
-        const count = Object.keys(this.environment || {}).filter(isSensitiveEnvironmentKey).length;
-        return count ? {
-            id: "sensitive_environment", label: "SENSITIVE ENVIRONMENT", state: "INSECURE", actual: "PRESENT",
-            detail: `${count} SENSITIVE OR RUNTIME-INJECTION ENVIRONMENT VARIABLE NAME(S) DETECTED`
-        } : {
-            id: "sensitive_environment", label: "SENSITIVE ENVIRONMENT", state: "SECURE", actual: "NOT_DETECTED",
-            detail: "NO KNOWN SENSITIVE OR RUNTIME-INJECTION ENVIRONMENT VARIABLE NAMES DETECTED"
+        const observed = this.secretsService.observe();
+        return {
+            id: "sensitive_environment", label: "SECRETS", state: observed.state,
+            actual: observed.actual, detail: observed.detail
         };
     }
 
@@ -1033,9 +1189,15 @@ class SecurityService {
 
     _rendererPrivilegeCheck() {
         if (this.debugConfiguration.nodeIntegration === false
-            && this.debugConfiguration.enableRemoteModule === false) return {
+            && this.debugConfiguration.enableRemoteModule === false
+            && this.debugConfiguration.contextIsolation === true
+            && this.debugConfiguration.preloadBridge === true) return {
             id: "renderer_privilege", label: "RENDERER PRIVILEGE", state: "SECURE", actual: "ISOLATED",
-            detail: "NODE INTEGRATION AND REMOTE MODULE ACCESS ARE DISABLED"
+            detail: "CONTEXT ISOLATION AND NAMED PRELOAD BRIDGE VERIFIED; NODE AND REMOTE ACCESS DISABLED"
+        };
+        if (this.debugConfiguration.preloadBridge === true) return {
+            id: "renderer_privilege", label: "RENDERER PRIVILEGE", state: "INSECURE", actual: "LEGACY_COMPATIBILITY",
+            detail: "NOMAD SECURITY PATHS USE A NAMED PRELOAD BRIDGE; LEGACY EDEX MODULES RETAIN NODE OR REMOTE ACCESS"
         };
         return {
             id: "renderer_privilege", label: "RENDERER PRIVILEGE", state: "INSECURE", actual: "LEGACY_NODE_ACCESS",
@@ -1063,10 +1225,24 @@ class SecurityService {
             ? (repositoryRuntime.available && !repositoryRuntime.active ? true : null)
             : levelAtLeast(observed.capabilities.maximumLevel, policy.minimumRepositoryIsolation);
         const automountActual = observed.automount.actual;
-        const tempActual = observed.temp.actual;
-        const persistenceActual = observed.persistence.actual;
+        const tempActual = observed.ephemeral.actual;
+        const persistenceActual = observed.ephemeral.ephemeralActive ? "EPHEMERAL" : observed.persistence.actual;
         const debugActual = observed.debug.actual;
         const secretsActual = observed.sensitiveEnvironment.actual;
+        const applicationActual = observed.application.actual;
+        const permissionChecks = observed.permissions ? [
+            observed.permissions.config,
+            observed.permissions.state,
+            observed.permissions.trust,
+            observed.permissions.apps,
+            observed.permissions.sessionEnv
+        ] : [];
+        const permissionsCompliant = permissionChecks.length > 0
+            && permissionChecks.every(check => ["SECURE", "NOT_APPLICABLE"].includes(check.state));
+        const restrictedNetwork = policy.networkPolicy !== "OS_POLICY";
+        const networkCompliant = !restrictedNetwork || (observed.firewallStatus.compliant === true
+            && observed.firewallStatus.nomadPolicyState === profileId
+            && observed.firewallStatus.ipv4 === true && observed.firewallStatus.ipv6 === true);
         return [
             {
                 id: "repository_execution", label: "REPOSITORY EXECUTION",
@@ -1103,29 +1279,31 @@ class SecurityService {
                 actual: observed.hostStorage.actual,
                 compliant: policy.hostStorageAccess === "OS_POLICY" ? true
                     : observed.hostStorage.actual === "NOT_DETECTED",
-                enforceable: policy.hostStorageAccess === "OS_POLICY" ? "YES" : "NO",
+                enforceable: policy.hostStorageAccess === "OS_POLICY" ? "YES" : "PARTIAL",
                 reason: policy.hostStorageAccess === "OS_POLICY" ? "PROFILE DEFERS TO CURRENT OS STORAGE POLICY"
-                    : "THIS PHASE INVENTORIES STORAGE BUT DOES NOT UNMOUNT OR BLOCK DEVICES"
+                    : "ONLY STRICTLY IDENTIFIED NON-ESSENTIAL MOUNTS CAN BE UNMOUNTED; ROOT, NOMAD, REPOSITORY, BOOT, RUNTIME, AND AMBIGUOUS FILESYSTEMS ARE PROTECTED"
             },
             {
                 id: "automount", label: "AUTOMOUNT",
                 desired: policy.automount,
                 actual: automountActual,
                 compliant: policy.automount === "OS_POLICY" ? true : automountActual === "DISABLED_GNOME",
-                enforceable: policy.automount === "OS_POLICY" ? "YES" : "NO",
+                enforceable: policy.automount === "OS_POLICY" ? "YES"
+                    : (automountActual === "UNAVAILABLE" || automountActual === "UNKNOWN" ? "PARTIAL" : "YES"),
                 reason: policy.automount === "OS_POLICY" ? "PROFILE DEFERS TO CURRENT OS AUTOMOUNT POLICY"
-                    : "THIS PHASE OBSERVES BUT DOES NOT CHANGE AUTOMOUNT SERVICES"
+                    : "NOMAD CAN RECORD AND CHANGE THE GNOME USER AUTOMOUNT SETTING; OTHER AUTOMOUNTERS AND MANUAL REMOUNTS REMAIN UNVERIFIED"
             },
             {
                 id: "temporary_data", label: "TEMPORARY DATA",
                 desired: policy.temporaryData,
                 actual: tempActual,
                 compliant: policy.temporaryData === "PERSISTENCE_ALLOWED" ? true
-                    : (policy.temporaryData === "EPHEMERAL_PREFERRED" ? tempActual === "VOLATILE"
-                        : tempActual === "VOLATILE"),
-                enforceable: policy.temporaryData === "PERSISTENCE_ALLOWED" ? "YES" : "NO",
+                    : tempActual === "VOLATILE",
+                enforceable: policy.temporaryData === "PERSISTENCE_ALLOWED" ? "YES"
+                    : (observed.ephemeral.policy && observed.ephemeral.policy.volatileRuntimeVerified ? "YES" : "PARTIAL"),
                 reason: policy.temporaryData === "PERSISTENCE_ALLOWED" ? "PERSISTENT TEMPORARY DATA IS ALLOWED"
-                    : "THIS PHASE DOES NOT REMOUNT /TMP OR GUARANTEE MEMORY ERASURE"
+                    : (observed.ephemeral.sessionRestartRequired ? "SESSION RESTART REQUIRED FOR PROFILE-AWARE VOLATILE ROUTES"
+                        : "ELIGIBLE NOMAD RUNTIME DATA USES VERIFIED XDG RUNTIME STORAGE")
             },
             {
                 id: "state_persistence", label: "STATE PERSISTENCE",
@@ -1134,17 +1312,17 @@ class SecurityService {
                 compliant: policy.statePersistence === "ALLOWED" ? true : persistenceActual === "EPHEMERAL",
                 enforceable: policy.statePersistence === "ALLOWED" ? "YES" : "PARTIAL",
                 reason: policy.statePersistence === "ALLOWED" ? "PERSISTENT NOMAD STATE IS ALLOWED"
-                    : "PROFILE STORE IS ENFORCED; GENERAL SESSION STATE IS NOT YET EPHEMERAL"
+                    : "ESSENTIAL TRUST/CONFIG REMAINS PERSISTENT; ELIGIBLE SESSION STATE REQUIRES A VERIFIED VOLATILE RUNTIME AND SESSION RESTART"
             },
             {
                 id: "application_execution", label: "APPLICATION EXECUTION",
                 desired: policy.applicationExecution,
-                actual: "CONTROLLED_REGISTRY",
-                compliant: policy.applicationExecution === "CONTROLLED_REGISTRY",
-                enforceable: policy.applicationExecution === "CONTROLLED_REGISTRY" ? "YES" : "PARTIAL",
+                actual: applicationActual,
+                compliant: observed.application.compliant,
+                enforceable: "YES",
                 reason: policy.applicationExecution === "CONTROLLED_REGISTRY"
-                    ? "MAIN PROCESS RESOLVES REGISTERED APPLICATIONS"
-                    : "LOCKDOWN BUILTIN-ONLY APPLICATION GATING IS POLICY-ONLY"
+                    ? "MAIN PROCESS RESOLVES REGISTERED APPLICATIONS; GUI APPLICATION ISOLATION IS REPORTED SEPARATELY"
+                    : "MAIN-SIDE POLICY ACCEPTS ONLY CENTRALLY DEFINED INTERNAL APPLICATION IDS; EXISTING PROCESSES ARE VERIFIED SEPARATELY"
             },
             {
                 id: "privilege_escalation", label: "PRIVILEGE ESCALATION",
@@ -1159,11 +1337,15 @@ class SecurityService {
             {
                 id: "network_policy", label: "NETWORK POLICY",
                 desired: policy.networkPolicy,
-                actual: policy.networkPolicy === "OS_POLICY" ? "OS_POLICY" : "NOT_ENFORCED",
-                compliant: policy.networkPolicy === "OS_POLICY",
-                enforceable: policy.networkPolicy === "OS_POLICY" ? "YES" : "NO",
+                actual: policy.networkPolicy === "OS_POLICY" ? "OS_POLICY"
+                    : (observed.firewallStatus.verificationResult === "VERIFIED"
+                        ? observed.firewallStatus.nomadPolicyState : "NOT_ENFORCED"),
+                compliant: networkCompliant,
+                enforceable: policy.networkPolicy === "OS_POLICY" ? "YES"
+                    : (observed.firewallStatus.enforcementBackend === "NFTABLES_DEDICATED_TABLE" ? "YES" : "NO"),
                 reason: policy.networkPolicy === "OS_POLICY" ? "PROFILE DEFERS TO CURRENT OS NETWORK POLICY"
-                    : "THIS PHASE DOES NOT APPLY FIREWALL OR NETWORK MUTATIONS"
+                    : (networkCompliant ? "DEDICATED NOMAD INET POLICY VERIFIED FOR IPV4 AND IPV6"
+                        : "SYSTEM ENFORCEMENT PENDING OR DUAL-STACK POLICY NOT VERIFIED")
             },
             {
                 id: "debug_exposure", label: "DEBUG EXPOSURE",
@@ -1178,10 +1360,48 @@ class SecurityService {
                 id: "secrets", label: "SENSITIVE ENVIRONMENT",
                 desired: policy.secrets,
                 actual: secretsActual,
-                compliant: policy.secrets === "MINIMIZED" ? secretsActual === "NOT_DETECTED"
-                    : secretsActual === "NOT_DETECTED",
+                compliant: policy.secrets === "MINIMIZED" ? observed.secrets.environmentClosed === true
+                    : observed.secrets.environmentClosed === true && observed.secrets.otherUserCredentialsAccessible === false,
                 enforceable: "PARTIAL",
-                reason: "REPOSITORY ENVIRONMENT IS ALLOWLISTED; LEGACY RENDERER ENVIRONMENT MAY STILL EXPOSE VALUES"
+                reason: observed.secrets.environmentClosed
+                    ? "PRODUCTION AND REPOSITORY ENVIRONMENTS ARE ALLOWLISTED; USER-OWNED CREDENTIAL FILE ACCESS IS NOT A CLOSED VAULT"
+                    : "SENSITIVE OR RUNTIME-INJECTION ENVIRONMENT NAMES REMAIN PRESENT"
+            },
+            {
+                id: "renderer_privilege", label: "RENDERER PRIVILEGE",
+                desired: "ISOLATED_NAMED_BRIDGE",
+                actual: observed.rendererPrivilege.actual,
+                compliant: observed.rendererPrivilege.state === "SECURE",
+                enforceable: "PARTIAL",
+                reason: observed.rendererPrivilege.state === "SECURE"
+                    ? "CONTEXT ISOLATION, NO NODE INTEGRATION, NO REMOTE MODULE, AND NAMED BRIDGE VERIFIED"
+                    : "LEGACY EDEX MODULE ACCESS REMAINS AND IS REPORTED AS INSECURE"
+            },
+            {
+                id: "permissions", label: "NOMAD RESOURCE PERMISSIONS",
+                desired: "KNOWN_SENSITIVE_PATHS_PRIVATE",
+                actual: permissionsCompliant ? "VERIFIED" : "FINDINGS_PRESENT",
+                compliant: permissionsCompliant,
+                enforceable: "YES",
+                reason: permissionsCompliant
+                    ? "KNOWN NOMAD RESOURCES HAVE VERIFIED OWNER, TYPE, LINK COUNT, AND MODE"
+                    : "RUN THE EXPLICIT KNOWN-PATH PERMISSION REPAIR PLAN"
+            },
+            {
+                id: "integrity", label: "INTEGRITY",
+                desired: "METADATA_VERIFIED_WITH_HONEST_TRUST_MODEL",
+                actual: observed.integrity.actual,
+                compliant: !["INSECURE", "UNKNOWN"].includes(observed.integrity.state),
+                enforceable: "PARTIAL",
+                reason: observed.integrity.threatModel
+            },
+            {
+                id: "session_type", label: "SESSION TYPE",
+                desired: "DEDICATED_NOMAD_SESSION",
+                actual: observed.session.actual,
+                compliant: observed.session.state === "SECURE",
+                enforceable: "YES",
+                reason: observed.session.detail
             }
         ];
     }
@@ -1189,6 +1409,7 @@ class SecurityService {
     _compliance(policy, profileId) {
         if (profileId === "UNKNOWN" || !policy.length) return "UNKNOWN";
         if (policy.some(item => item.compliant === false)) return "NON_COMPLIANT";
+        if (profileId === "LOCKDOWN" && policy.some(item => item.compliant === null)) return "NON_COMPLIANT";
         if (policy.some(item => item.compliant === null)) return "UNKNOWN";
         return "COMPLIANT";
     }
@@ -1235,7 +1456,7 @@ class SecurityService {
                 id: item.id,
                 label: item.label,
                 detail: `${item.actual}; DESIRED ${item.desired}`,
-                remediation: item.enforceable === "NO" ? "SYSTEM-LEVEL ENFORCEMENT PENDING" : item.reason
+                remediation: item.enforceable === "NO" ? "SYSTEM ENFORCEMENT PENDING" : item.reason
             }));
         const severityRank = {HIGH: 0, MEDIUM: 1, LOW: 2, INFO: 3};
         findings.sort((left, right) => severityRank[left.severity] - severityRank[right.severity]
@@ -1245,18 +1466,19 @@ class SecurityService {
 
     _remediation(id) {
         const remediation = {
-            firewall: "REVIEW FIREWALL POLICY IN THE NEXT SYSTEM-ENFORCEMENT PHASE",
-            host_storage: "REVIEW INTERNAL STORAGE BLOCKING IN THE NEXT SYSTEM-ENFORCEMENT PHASE",
-            automount: "REVIEW AUTOMOUNT ENFORCEMENT IN THE NEXT SYSTEM-ENFORCEMENT PHASE",
+            firewall: "RUN NOMAD SECURITY PLAN; INSTALL AND EXPLICITLY APPLY THE NARROW HELPER IF THE PLAN IS SAFE",
+            host_storage: "REVIEW STRICTLY ELIGIBLE MOUNTS; ROOT, NOMAD, REPOSITORY, BOOT, RUNTIME, AND AMBIGUOUS TARGETS ARE NEVER SELECTED",
+            automount: "RUN NOMAD SECURITY ENFORCE --APPLY TO RECORD AND DISABLE SUPPORTED USER AUTOMOUNT",
             repository_isolation: "ENABLE A VERIFIED USER-LEVEL ISOLATION BACKEND OR USE A FAIL-CLOSED PROFILE",
             privilege_escalation: "REVIEW TERMINAL AND APPLICATION POLICY FOR PUBLIC/LOCKDOWN USE",
             disk_encryption: "VERIFY THE COMPLETE BOOT AND DATA DEVICE ENCRYPTION CHAIN",
             swap: "REVIEW SWAP BACKING BEFORE PUBLIC USE; THIS PHASE DOES NOT DISABLE SWAP",
             debug_devtools: "USE NOMAD PRODUCTION MODE FOR THE DEDICATED SESSION",
-            renderer_privilege: "PLAN LEGACY RENDERER ISOLATION WITHOUT WEAKENING NAMED IPC",
-            sensitive_environment: "START NOMAD WITHOUT SECRET-BEARING ENVIRONMENT VARIABLES",
-            temporary_storage: "USE VERIFIED VOLATILE TEMPORARY STORAGE IN A LATER ENFORCEMENT PHASE",
-            nomad_persistence: "MOVE SESSION STATE TO VERIFIED EPHEMERAL STORAGE WHEN REQUIRED"
+            renderer_privilege: "COMPLETE LEGACY EDEX MODULE MIGRATION TO THE NAMED PRELOAD BRIDGE",
+            sensitive_environment: "RESTART THE DEDICATED PRODUCTION SESSION THROUGH THE MINIMAL ENVIRONMENT ALLOWLIST",
+            temporary_storage: "RESTART THE SESSION TO ACTIVATE VERIFIED VOLATILE PROFILE ROUTES",
+            nomad_persistence: "KEEP ESSENTIAL CONFIG PERSISTENT AND ROUTE ONLY ELIGIBLE RUNTIME STATE TO VERIFIED VOLATILE STORAGE",
+            integrity: "USE A FUTURE SIGNED OR READ-ONLY ROOT OF TRUST; USER-WRITABLE METADATA CHECKS ARE NOT TAMPER-PROOF"
         };
         return remediation[id] || "REVIEW THE VERIFIED CONDITION AND PROFILE POLICY";
     }
@@ -1291,7 +1513,14 @@ class SecurityService {
         try {
             const result = this.spawnSync(executable, args, {
                 encoding: "utf8",
-                env: {PATH: this.environment.PATH || "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+                env: {
+                    PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    LANG: "C",
+                    HOME: this.environment.HOME || this.home,
+                    DBUS_SESSION_BUS_ADDRESS: this.environment.DBUS_SESSION_BUS_ADDRESS || "",
+                    XDG_RUNTIME_DIR: this.environment.XDG_RUNTIME_DIR || "",
+                    XDG_CONFIG_HOME: this.environment.XDG_CONFIG_HOME || ""
+                },
                 shell: false,
                 timeout: this.commandTimeoutMs,
                 maxBuffer: MAX_SYSTEM_FILE_BYTES,
@@ -1334,7 +1563,10 @@ async function handleSecurityProfileGetRequest(service, request) {
             profile: profile.profile,
             source: profile.source,
             compliance: profile.compliance,
-            systemEnforcementPending: profile.systemEnforcementPending
+            enforced: profile.enforced,
+            enforcementState: profile.enforcementState,
+            systemEnforcementPending: profile.systemEnforcementPending,
+            sessionRestartRequired: profile.sessionRestartRequired
         };
     } catch (error) {
         return {ok: false, status: error instanceof SecurityProfileError ? error.status : "SECURITY PROFILE UNAVAILABLE"};
@@ -1352,7 +1584,10 @@ async function handleSecurityProfileSetRequest(service, request) {
             status: "PROFILE CHANGED",
             profile: profile.profile,
             compliance: profile.compliance,
-            systemEnforcementPending: profile.systemEnforcementPending
+            enforced: profile.enforced,
+            enforcementState: profile.enforcementState,
+            systemEnforcementPending: profile.systemEnforcementPending,
+            sessionRestartRequired: profile.sessionRestartRequired
         };
     } catch (error) {
         return {ok: false, status: error instanceof SecurityProfileError ? error.status : "SECURITY PROFILE CHANGE REFUSED"};

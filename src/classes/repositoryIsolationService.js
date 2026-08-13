@@ -4,6 +4,7 @@ const os = require("os");
 const path = require("path");
 const {spawnSync} = require("child_process");
 const {SECURITY_PROFILES, normalizeSecurityProfile} = require("./securityProfileService.js");
+const {isSensitiveEnvironmentKey} = require("./securityEnvironmentService.js");
 
 const ISOLATION_LEVELS = Object.freeze(["UNAVAILABLE", "NONE", "PARTIAL", "STRONG"]);
 const ISOLATION_RANK = Object.freeze({UNAVAILABLE: -1, NONE: 0, PARTIAL: 1, STRONG: 2});
@@ -39,6 +40,13 @@ const SYSTEMD_HARDENING_PROPERTIES = Object.freeze([
     "TimeoutStopSec=5s",
     "InaccessiblePaths=-/run/user -/media -/mnt -/run/media"
 ]);
+const TRUSTED_ISOLATION_TOOL_PATHS = Object.freeze({
+    bwrap: Object.freeze(["/usr/bin/bwrap", "/bin/bwrap"]),
+    "systemd-run": Object.freeze(["/usr/bin/systemd-run", "/bin/systemd-run"]),
+    systemctl: Object.freeze(["/usr/bin/systemctl", "/bin/systemctl"]),
+    env: Object.freeze(["/usr/bin/env", "/bin/env"]),
+    true: Object.freeze(["/usr/bin/true", "/bin/true"])
+});
 
 class RepositoryIsolationError extends Error {
     constructor(status) {
@@ -54,21 +62,6 @@ function clone(value) {
 
 function validEnvironmentValue(value) {
     return typeof value === "string" && value.length <= 32768 && !/[\u0000-\u001f\u007f]/.test(value);
-}
-
-function isSensitiveEnvironmentKey(key) {
-    if (typeof key !== "string") return false;
-    const upper = key.toUpperCase();
-    if ([
-        "SSH_AUTH_SOCK", "GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "DATABASE_URL",
-        "KUBECONFIG", "DOCKER_AUTH_CONFIG", "BASH_ENV", "ENV", "NODE_OPTIONS", "NODE_PATH",
-        "NODE_DEBUG", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "RUBYOPT", "PERL5OPT",
-        "ELECTRON_RUN_AS_NODE", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_SSH", "GIT_SSH_COMMAND",
-        "NPM_CONFIG_USERCONFIG"
-    ].includes(upper)) return true;
-    return /^(AWS|AZURE|GOOGLE|GCP|VAULT|NPM|YARN|PIP|NVM|CARGO|SSH|GCM|GIT_CONFIG)_/.test(upper)
-        || /(^|_)(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_KEY|PRIVATE_KEY|ACCESS_KEY)(_|$)/.test(upper)
-        || /^(LD_|DYLD_)/.test(upper);
 }
 
 function buildRepositoryRunEnvironment(source = process.env, overrides = {}) {
@@ -117,6 +110,33 @@ function resolveExecutable(executable, opts = {}) {
     return null;
 }
 
+function resolveTrustedIsolationTool(tool, opts = {}) {
+    const fsModule = opts.fs || fs;
+    const pathModule = opts.path || path;
+    const candidates = (opts.toolPaths || TRUSTED_ISOLATION_TOOL_PATHS)[tool];
+    if (!Array.isArray(candidates)) return null;
+    for (const candidate of candidates) {
+        if (typeof candidate !== "string" || !pathModule.isAbsolute(candidate)) continue;
+        try {
+            const canonical = fsModule.realpathSync(candidate);
+            const stats = fsModule.statSync(canonical);
+            if (!stats.isFile() || stats.uid !== 0 || (stats.mode & 0o022) !== 0 || (stats.mode & 0o111) === 0) continue;
+            let parentPath = pathModule.dirname(canonical);
+            let trusted = true;
+            while (trusted) {
+                const parent = fsModule.lstatSync(parentPath);
+                trusted = !parent.isSymbolicLink() && parent.isDirectory() && parent.uid === 0
+                    && (parent.mode & 0o022) === 0
+                    && fsModule.realpathSync(parentPath) === pathModule.resolve(parentPath);
+                if (!trusted || parentPath === pathModule.parse(parentPath).root) break;
+                parentPath = pathModule.dirname(parentPath);
+            }
+            if (trusted) return canonical;
+        } catch (error) {}
+    }
+    return null;
+}
+
 function levelAtLeast(actual, required) {
     return Object.prototype.hasOwnProperty.call(ISOLATION_RANK, actual)
         && Object.prototype.hasOwnProperty.call(ISOLATION_RANK, required)
@@ -147,11 +167,10 @@ class RepositoryIsolationService {
         this.spawnSync = opts.spawnSync || spawnSync;
         this.randomBytes = opts.randomBytes || crypto.randomBytes;
         this.probeBackend = typeof opts.probeBackend === "function" ? opts.probeBackend : null;
-        this.resolveExecutable = opts.resolveExecutable || (executable => resolveExecutable(executable, {
+        this.resolveExecutable = opts.resolveExecutable || (executable => resolveTrustedIsolationTool(executable, {
             fs: this.fs,
             path: this.path,
-            env: this.environment,
-            platform: this.platform
+            toolPaths: opts.isolationToolPaths
         }));
         this.runtimeRoot = opts.runtimeRoot || this.path.join(this.os.tmpdir(), "nomad-repository-runtime");
         this.capabilityCache = null;
@@ -283,7 +302,10 @@ class RepositoryIsolationService {
         if (!executable) return {
             id: "BUBBLEWRAP", level: "STRONG", available: false, reason: "BUBBLEWRAP NOT AVAILABLE"
         };
-        const trueExecutable = this.resolveExecutable("true") || "/usr/bin/true";
+        const trueExecutable = this.resolveExecutable("true");
+        if (!trueExecutable) return {
+            id: "BUBBLEWRAP", level: "STRONG", available: false, reason: "TRUSTED PROBE EXECUTABLE NOT AVAILABLE"
+        };
         const probeDirectory = this.path.resolve(process.cwd());
         const context = {executable, trueExecutable, probeDirectory};
         const available = this._probe("BUBBLEWRAP", context, () => {
@@ -315,8 +337,8 @@ class RepositoryIsolationService {
         const executable = this.resolveExecutable("systemd-run");
         const systemctl = this.resolveExecutable("systemctl");
         const envExecutable = this.resolveExecutable("env");
-        const trueExecutable = this.resolveExecutable("true") || "/usr/bin/true";
-        if (!executable || !systemctl || !envExecutable) return {
+        const trueExecutable = this.resolveExecutable("true");
+        if (!executable || !systemctl || !envExecutable || !trueExecutable) return {
             id: "SYSTEMD_USER", level: "PARTIAL", available: false,
             reason: "SYSTEMD USER SANDBOX TOOLS NOT AVAILABLE"
         };
@@ -466,15 +488,15 @@ class RepositoryIsolationService {
             } catch (error) {}
         });
         output.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp");
-        this._runtimeRoots(executable).forEach(runtimeRoot => {
+        this._runtimeBindings(executable).forEach(binding => {
             const parents = [];
-            let current = this.path.dirname(runtimeRoot);
+            let current = this.path.dirname(binding.target);
             while (current && current !== this.path.dirname(current) && current !== "/") {
                 parents.unshift(current);
                 current = this.path.dirname(current);
             }
             parents.forEach(parent => output.push("--dir", parent));
-            output.push("--ro-bind", runtimeRoot, runtimeRoot);
+            output.push("--ro-bind", binding.source, binding.target);
         });
         output.push("--dir", "/workspace", "--bind", repositoryPath, "/workspace", "--chdir", "/workspace");
         output.push("--clearenv");
@@ -512,6 +534,13 @@ class RepositoryIsolationService {
             return [this.path.join(this.home, parts[0], parts[1], parts[2], parts[3])];
         }
         return [this.path.dirname(executable)];
+    }
+
+    _runtimeBindings(executable) {
+        return this._runtimeRoots(executable).map(runtimeRoot => ({
+            source: runtimeRoot,
+            target: runtimeRoot
+        }));
     }
 
     _controllerEnvironment() {
@@ -576,9 +605,11 @@ module.exports = {
     RepositoryIsolationError,
     RepositoryIsolationService,
     SYSTEMD_HARDENING_PROPERTIES,
+    TRUSTED_ISOLATION_TOOL_PATHS,
     buildRepositoryRunEnvironment,
     escapeSystemdPath,
     isSensitiveEnvironmentKey,
     levelAtLeast,
-    resolveExecutable
+    resolveExecutable,
+    resolveTrustedIsolationTool
 };

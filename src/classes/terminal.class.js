@@ -1,3 +1,30 @@
+const crypto = require("crypto");
+
+const TERMINAL_AUTH_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
+
+function normalizeTerminalPort(value) {
+    if (typeof value === "string" && !/^[1-9]\d{0,4}$/.test(value)) return null;
+    if (typeof value !== "string" && typeof value !== "number") return null;
+    const port = Number(value);
+    return Number.isSafeInteger(port) && port >= 1 && port <= 65535 ? port : null;
+}
+
+function terminalWebsocketRequestAuthorized(info, expectedToken) {
+    if (!TERMINAL_AUTH_TOKEN_PATTERN.test(expectedToken || "") || !info || !info.req
+        || typeof info.req.url !== "string") return false;
+    try {
+        const requestUrl = new URL(info.req.url, "ws://127.0.0.1");
+        const entries = Array.from(requestUrl.searchParams.entries());
+        if (requestUrl.pathname !== "/" || entries.length !== 1 || entries[0][0] !== "token"
+            || !TERMINAL_AUTH_TOKEN_PATTERN.test(entries[0][1])) return false;
+        const expected = Buffer.from(expectedToken, "utf8");
+        const provided = Buffer.from(entries[0][1], "utf8");
+        return expected.length === provided.length && crypto.timingSafeEqual(expected, provided);
+    } catch (error) {
+        return false;
+    }
+}
+
 class Terminal {
     constructor(opts) {
         if (opts.role === "client") {
@@ -10,7 +37,9 @@ class Terminal {
             const {WebglAddon} = require("xterm-addon-webgl");
             this.Ipc = require("electron").ipcRenderer;
 
-            this.port = opts.port || 3000;
+            this.port = normalizeTerminalPort(typeof opts.port === "undefined" ? 3000 : opts.port);
+            if (this.port === null) throw new Error("Invalid terminal port");
+            this.authToken = TERMINAL_AUTH_TOKEN_PATTERN.test(opts.authToken || "") ? opts.authToken : null;
             this.cwd = "";
             this.oncwdchange = () => {};
 
@@ -176,7 +205,8 @@ class Terminal {
             let sockHost = opts.host || "127.0.0.1";
             let sockPort = this.port;
 
-            this.socket = new WebSocket("ws://"+sockHost+":"+sockPort);
+            const socketQuery = this.authToken ? "?token="+encodeURIComponent(this.authToken) : "";
+            this.socket = new WebSocket("ws://"+sockHost+":"+sockPort+"/"+socketQuery);
             this.socket.onopen = () => {
                 let attachAddon = new AttachAddon(this.socket);
                 this.term.loadAddon(attachAddon);
@@ -306,7 +336,13 @@ class Terminal {
             this.Ipc = require("electron").ipcMain;
 
             this.renderer = null;
-            this.port = opts.port || 3000;
+            this.port = normalizeTerminalPort(typeof opts.port === "undefined" ? 3000 : opts.port);
+            if (this.port === null) throw new Error("Invalid terminal port");
+            this.requireAuthentication = opts.requireAuthentication === true;
+            this.authToken = TERMINAL_AUTH_TOKEN_PATTERN.test(opts.authToken || "") ? opts.authToken : null;
+            if (this.requireAuthentication && !this.authToken) {
+                throw new Error("Authenticated terminal transport requires a valid capability token");
+            }
 
             this._closed = false;
             this.onclosed = () => {};
@@ -435,18 +471,19 @@ class Terminal {
 
             this.wss = new this.Websocket({
                 port: this.port,
+                host: opts.host,
                 clientTracking: true,
                 verifyClient: info => {
-                    if (this.wss.clients.length >= 1) {
-                        return false;
-                    } else {
-                        return true;
-                    }
+                    if (this.wss.clients.length >= 1) return false;
+                    return !this.requireAuthentication
+                        || terminalWebsocketRequestAuthorized(info, this.authToken);
                 }
             });
             this.Ipc.on("terminal_channel-"+this.port, (e, ...args) => {
+                if (typeof opts.isRendererAuthorized === "function" && !opts.isRendererAuthorized(e.sender)) return;
                 switch(args[0]) {
                     case "Renderer startup":
+                        if (args.length !== 1) return;
                         this.renderer = e.sender;
                         if (!this._disableCWDtracking && this.tty._cwd) {
                             this.renderer.send("terminal_channel-"+this.port, "New cwd", this.tty._cwd);
@@ -456,8 +493,10 @@ class Terminal {
                         }
                         break;
                     case "Resize":
+                        if (args.length !== 3 || !/^\d{3}$/.test(args[1]) || !/^\d{3}$/.test(args[2])) return;
                         let cols = args[1];
                         let rows = args[2];
+                        if (Number(cols) < 1 || Number(cols) > 500 || Number(rows) < 1 || Number(rows) > 500) return;
                         try {
                             this.tty.resize(Number(cols), Number(rows));
                         } catch (error) {
@@ -500,5 +539,8 @@ class Terminal {
 }
 
 module.exports = {
-    Terminal
+    TERMINAL_AUTH_TOKEN_PATTERN,
+    Terminal,
+    normalizeTerminalPort,
+    terminalWebsocketRequestAuthorized
 };

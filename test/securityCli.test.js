@@ -75,7 +75,7 @@ async function run() {
     assert(status.stdout.includes("NONE"));
     assert(status.stdout.includes("HOST STORAGE"));
     assert(status.stdout.includes("ACCESSIBLE"));
-    assert(status.stdout.includes("SYSTEM-LEVEL ENFORCEMENT PENDING"));
+    assert(status.stdout.includes("SYSTEM ENFORCEMENT PENDING"));
 
     const verbose = await invoke(["security", "status", "--verbose"], securityCliService);
     assert.strictEqual(verbose.code, 0);
@@ -105,7 +105,7 @@ async function run() {
     assert.strictEqual(changed.code, 0);
     assert(changed.stdout.includes("PROFILE CHANGED"));
     assert(changed.stdout.includes("PROFILE: LOCKDOWN"));
-    assert(changed.stdout.includes("SYSTEM-LEVEL ENFORCEMENT PENDING"));
+    assert(changed.stdout.includes("SYSTEM ENFORCEMENT PENDING"));
     assert.deepStrictEqual(profileChanges, ["lockdown"]);
 
     const invalid = await invoke(["security", "status", "--json"], securityCliService);

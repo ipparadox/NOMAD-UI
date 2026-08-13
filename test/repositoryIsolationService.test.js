@@ -6,7 +6,8 @@ const {
     RepositoryIsolationService,
     buildRepositoryRunEnvironment,
     escapeSystemdPath,
-    isSensitiveEnvironmentKey
+    isSensitiveEnvironmentKey,
+    resolveTrustedIsolationTool
 } = require("../src/classes/repositoryIsolationService.js");
 
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "nomad-isolation-"));
@@ -40,6 +41,11 @@ try {
         LD_PRELOAD: "/tmp/inject.so",
         NVM_DIR: "/home/real-user/.nvm"
     };
+    const pathShim = path.join(temporaryRoot, "bwrap");
+    fs.writeFileSync(pathShim, "not a trusted isolation backend\n", {mode: 0o755});
+    assert.strictEqual(resolveTrustedIsolationTool("bwrap", {
+        toolPaths: {bwrap: [pathShim]}
+    }), null, "a user-owned PATH shim must never qualify as a STRONG isolation backend");
     const minimal = buildRepositoryRunEnvironment(sourceEnvironment, {
         HOME: "/isolated/home",
         TMPDIR: "/isolated/tmp",

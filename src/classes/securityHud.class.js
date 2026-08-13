@@ -61,7 +61,12 @@ class SecurityHud {
         return {
             profileId,
             compliance,
+            enforced: ["NORMAL", "PUBLIC", "LOCKDOWN", "NONE", "UNKNOWN"].includes(status.profile.enforced)
+                ? status.profile.enforced : "NONE",
+            enforcementState: ["VERIFIED", "PARTIAL", "UNAPPLIED", "NOT_APPLICABLE", "UNKNOWN"].includes(status.profile.enforcementState)
+                ? status.profile.enforcementState : "UNKNOWN",
             systemEnforcementPending: status.profile.systemEnforcementPending === true,
+            sessionRestartRequired: status.profile.sessionRestartRequired === true,
             checks
         };
     }
@@ -77,9 +82,11 @@ class SecurityHud {
         return `<section id="security_hud">
             <header>
                 <span>PROFILE ${escape(status.profileId)}</span>
+                <span>ENFORCED ${escape(status.enforced)} // ${escape(status.enforcementState)}</span>
                 <span>${escape(status.compliance)}</span>
             </header>
-            ${status.systemEnforcementPending ? "<p>SYSTEM-LEVEL ENFORCEMENT PENDING</p>" : ""}
+            ${status.systemEnforcementPending ? "<p>SYSTEM ENFORCEMENT PENDING</p>" : ""}
+            ${status.sessionRestartRequired ? "<p>SESSION RESTART REQUIRED</p>" : ""}
             <div>
                 <table>
                     <thead><tr><th>CHECK</th><th>ACTUAL</th><th>STATE</th><th>DETAIL</th></tr></thead>

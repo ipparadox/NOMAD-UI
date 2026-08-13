@@ -18,6 +18,7 @@ function runFixture(name, prepare) {
     fs.mkdirSync(home, {recursive: true});
     fs.mkdirSync(nomadConfig, {recursive: true});
     fs.mkdirSync(fakeBin, {recursive: true});
+    [root, home, configRoot, nomadConfig].forEach(directory => fs.chmodSync(directory, 0o700));
     fs.writeFileSync(path.join(fakeBin, "i3-msg"), "#!/usr/bin/env bash\nexit 0\n", {mode: 0o755});
     prepare({root, home, nomadConfig});
     const result = childProcess.spawnSync("bash", [launcher, "--launch-ui"], {
@@ -53,6 +54,25 @@ try {
         );
         fs.chmodSync(path.join(nomadConfig, "session.env"), 0o666);
     });
+
+    const unsafeRoot = path.join(temporaryRoot, "unsafe-config-parent");
+    const unsafeHome = path.join(unsafeRoot, "home");
+    const unsafeConfig = path.join(unsafeRoot, "config");
+    fs.mkdirSync(unsafeHome, {recursive: true, mode: 0o700});
+    fs.mkdirSync(unsafeConfig, {recursive: true, mode: 0o777});
+    fs.chmodSync(unsafeConfig, 0o777);
+    const unsafeParent = childProcess.spawnSync("bash", [launcher, "--launch-ui"], {
+        cwd: repositoryRoot,
+        env: Object.assign({}, process.env, {
+            HOME: unsafeHome,
+            XDG_CONFIG_HOME: unsafeConfig,
+            XDG_STATE_HOME: path.join(unsafeRoot, "state")
+        }),
+        encoding: "utf8",
+        shell: false
+    });
+    assert.notStrictEqual(unsafeParent.status, 0);
+    assert(unsafeParent.stderr.includes("unsafe configuration directory"));
     console.log("NOMAD session refuses symlinked or writable session.env files and creates private logs passed");
 } finally {
     fs.rmSync(temporaryRoot, {recursive: true, force: true});

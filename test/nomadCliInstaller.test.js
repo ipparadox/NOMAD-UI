@@ -17,6 +17,8 @@ function environment(root) {
     const systemRoot = path.join(root, "system");
     fs.mkdirSync(fakeBin, {recursive: true});
     fs.mkdirSync(home, {recursive: true});
+    fs.chmodSync(root, 0o700);
+    fs.chmodSync(home, 0o700);
     const sudo = path.join(fakeBin, "sudo");
     fs.writeFileSync(sudo, "#!/usr/bin/env bash\nexec \"$@\"\n", {mode: 0o755});
     return {
@@ -60,7 +62,9 @@ assert.strictEqual(
     0o600,
     "new session.env files must be private"
 );
-assert(fs.readFileSync(ownedEnv.NOMAD_SYSTEM_LAUNCHER, "utf8").includes("export NOMAD_PRODUCTION=1"));
+const installedSessionLauncher = fs.readFileSync(ownedEnv.NOMAD_SYSTEM_LAUNCHER, "utf8");
+assert(installedSessionLauncher.includes('"NOMAD_PRODUCTION=1"'));
+assert(installedSessionLauncher.includes("env -i"), "production launch must start from an explicit environment");
 
 fs.accessSync(cliSource, fs.constants.X_OK);
 
@@ -101,12 +105,26 @@ const unsafeEnv = environment(unsafeEnvRoot);
 const unsafeConfigDirectory = path.join(unsafeEnv.XDG_CONFIG_HOME, "nomad");
 const unsafeVictim = path.join(unsafeEnvRoot, "victim.env");
 fs.mkdirSync(unsafeConfigDirectory, {recursive: true});
+fs.chmodSync(unsafeEnv.XDG_CONFIG_HOME, 0o700);
+fs.chmodSync(unsafeConfigDirectory, 0o700);
 fs.writeFileSync(unsafeVictim, "DO NOT CHANGE\n", {mode: 0o600});
 fs.symlinkSync(unsafeVictim, path.join(unsafeConfigDirectory, "session.env"));
 const unsafeInstall = run(installScript, unsafeEnv);
 assert.notStrictEqual(unsafeInstall.status, 0);
 assert(unsafeInstall.stderr.includes("unsafe NOMAD session environment file"));
 assert.strictEqual(fs.readFileSync(unsafeVictim, "utf8"), "DO NOT CHANGE\n");
+
+const linkedConfigRoot = path.join(temporaryRoot, "linked-config");
+const linkedConfigEnv = environment(linkedConfigRoot);
+const linkedConfigVictim = path.join(linkedConfigRoot, "victim-directory");
+fs.mkdirSync(linkedConfigEnv.XDG_CONFIG_HOME, {recursive: true});
+fs.mkdirSync(linkedConfigVictim, {mode: 0o755});
+fs.symlinkSync(linkedConfigVictim, path.join(linkedConfigEnv.XDG_CONFIG_HOME, "nomad"));
+const linkedConfigInstall = run(installScript, linkedConfigEnv);
+assert.notStrictEqual(linkedConfigInstall.status, 0);
+assert(linkedConfigInstall.stderr.includes("unsafe NOMAD configuration directory"));
+assert.strictEqual(fs.statSync(linkedConfigVictim).mode & 0o777, 0o755,
+    "installer must not chmod a symlink target");
 
 fs.rmSync(temporaryRoot, {recursive: true, force: true});
 console.log("NOMAD session installer CLI ownership, collision handling, and safe uninstall passed");

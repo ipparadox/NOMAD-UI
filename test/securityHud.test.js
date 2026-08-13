@@ -20,7 +20,10 @@ async function run() {
                 profile: {
                     id: "PUBLIC",
                     compliance: "NON_COMPLIANT",
-                    systemEnforcementPending: true
+                    enforced: "PUBLIC",
+                    enforcementState: "PARTIAL",
+                    systemEnforcementPending: true,
+                    sessionRestartRequired: true
                 },
                 checks: [{
                     label: "HOST STORAGE",
@@ -38,7 +41,9 @@ async function run() {
     assert.strictEqual(modals[0].options.title, "NOMAD // SECURITY STATUS");
     assert(modals[0].options.html.includes("PROFILE PUBLIC"));
     assert(modals[0].options.html.includes("NON_COMPLIANT"));
-    assert(modals[0].options.html.includes("SYSTEM-LEVEL ENFORCEMENT PENDING"));
+    assert(modals[0].options.html.includes("SYSTEM ENFORCEMENT PENDING"));
+    assert(modals[0].options.html.includes("SESSION RESTART REQUIRED"));
+    assert(modals[0].options.html.includes("ENFORCED PUBLIC // PARTIAL"));
     assert(modals[0].options.html.includes("&lt;script&gt;"));
     assert(!modals[0].options.html.includes("<script>"));
     assert(!modals[0].options.html.includes("/home/user/private"));

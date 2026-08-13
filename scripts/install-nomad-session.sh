@@ -18,6 +18,32 @@ readonly USER_CLI="$USER_BIN_DIR/nomad"
 readonly USER_CLI_MARKER="$USER_CONFIG_DIR/.cli-v0.4-d-installed"
 readonly CLI_MARKER_HEADER="NOMAD-UI CLI v0.4-d"
 
+ensure_private_user_directory() {
+    local directory="$1"
+    local existing="$directory"
+    local existing_mode=""
+    local canonical=""
+    [[ "$directory" == /* && ! -L "$directory" ]] || return 1
+    while [[ ! -e "$existing" && ! -L "$existing" ]]; do
+        [[ "$existing" != "/" ]] || break
+        existing="$(dirname -- "$existing")"
+    done
+    [[ -d "$existing" && ! -L "$existing" && -O "$existing" ]] || return 1
+    existing_mode="$(stat -c '%a' -- "$existing" 2>/dev/null || true)"
+    [[ "$existing_mode" =~ ^[0-7]{3,4}$ && $((8#$existing_mode & 022)) -eq 0 ]] || return 1
+    canonical="$(readlink -f -- "$existing" 2>/dev/null || true)"
+    [[ "$canonical" == "$existing" ]] || return 1
+    mkdir -p -- "$directory" || return 1
+    [[ -d "$directory" && ! -L "$directory" && -O "$directory" ]] || return 1
+    [[ "$(readlink -f -- "$directory" 2>/dev/null || true)" == "$directory" ]] || return 1
+    chmod 0700 -- "$directory"
+}
+
+ensure_private_user_directory "$USER_CONFIG_DIR" || {
+    printf 'Refusing an unsafe NOMAD configuration directory: %s\n' "$USER_CONFIG_DIR" >&2
+    exit 1
+}
+
 for source_file in nomad-session nomad.desktop i3.config; do
     [[ -f "$SESSION_SOURCE/$source_file" ]] || {
         printf 'Missing source file: %s\n' "$SESSION_SOURCE/$source_file" >&2
@@ -47,6 +73,12 @@ if [[ -L "$USER_ENV" || ( -e "$USER_ENV" && ! -f "$USER_ENV" ) ]]; then
     printf 'Refusing an unsafe NOMAD session environment file: %s\n' "$USER_ENV" >&2
     exit 1
 fi
+if [[ -e "$USER_ENV" ]]; then
+    [[ -O "$USER_ENV" && "$(stat -c '%h' -- "$USER_ENV" 2>/dev/null || true)" == "1" ]] || {
+        printf 'Refusing an unowned or hard-linked NOMAD session environment file: %s\n' "$USER_ENV" >&2
+        exit 1
+    }
+fi
 
 if [[ -e "$USER_CLI_MARKER" || -L "$USER_CLI_MARKER" ]]; then
     [[ -f "$USER_CLI_MARKER" && ! -L "$USER_CLI_MARKER" ]] || {
@@ -73,15 +105,16 @@ sudo install -D -m 0755 "$SESSION_SOURCE/nomad-session" "$SYSTEM_LAUNCHER"
 sudo install -D -m 0644 "$SESSION_SOURCE/nomad.desktop" "$SYSTEM_DESKTOP"
 sudo install -D -m 0644 /dev/null "$SYSTEM_MARKER"
 
-install -D -m 0644 "$SESSION_SOURCE/i3.config" "$USER_I3_CONFIG"
+install -D -m 0600 "$SESSION_SOURCE/i3.config" "$USER_I3_CONFIG"
 if [[ ! -e "$USER_ENV" ]]; then
     printf '%s\n' \
-        '# Optional NOMAD session overrides (shell syntax).' \
-        '# NOMAD_ROOT="$HOME/Projects/NOMAD-UI"' \
-        '# NVM_DIR="$HOME/.nvm"' >"$USER_ENV"
-    chmod 0600 "$USER_ENV"
+        '# Optional NOMAD session path overrides.' \
+        '# Only literal NOMAD_ROOT=/absolute/path and NVM_DIR=/absolute/path entries are accepted.' \
+        "# NOMAD_ROOT=$REPO_ROOT" \
+        "# NVM_DIR=$HOME/.nvm" >"$USER_ENV"
 fi
-install -m 0644 /dev/null "$USER_MARKER"
+chmod 0600 "$USER_ENV"
+install -m 0600 /dev/null "$USER_MARKER"
 
 mkdir -p "$USER_BIN_DIR"
 if [[ ! -e "$USER_CLI" && ! -L "$USER_CLI" ]]; then

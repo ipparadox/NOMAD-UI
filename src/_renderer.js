@@ -39,6 +39,36 @@ const fs = require("fs");
 const electron = require("electron");
 const remote = require("@electron/remote");
 const ipc = electron.ipcRenderer;
+const nomadBridge = window.nomad || null;
+const nomadWindowManagerIpc = nomadBridge ? {
+    on: (channel, callback) => {
+        if (channel === "window-manager-state") return nomadBridge.windowManager.onState(payload => callback(null, payload));
+        if (channel === "window-manager-geometry-changed") return nomadBridge.windowManager.onGeometryChanged(payload => callback(null, payload));
+        return () => {};
+    },
+    send: (channel, request) => channel === "window-manager-operation"
+        && nomadBridge.windowManager.send(request)
+} : ipc;
+const nomadTerminalOperationIpc = nomadBridge ? {
+    invoke: (channel, operation) => {
+        if (channel !== "terminal-operation") return Promise.resolve({ok: false, status: "INVALID REQUEST"});
+        if (operation === "terminal.getForegroundState") return nomadBridge.terminal.getForegroundState();
+        if (operation === "terminal.stopForeground") return nomadBridge.terminal.stopForeground();
+        return Promise.resolve({ok: false, status: "INVALID REQUEST"});
+    }
+} : ipc;
+function terminalConnection(port) {
+    const normalizedPort = Number(port);
+    if (!Number.isSafeInteger(normalizedPort) || normalizedPort < 1 || normalizedPort > 65535) {
+        throw new Error("Invalid terminal port");
+    }
+    const connection = nomadBridge ? nomadBridge.terminal.connection(normalizedPort)
+        : ipc.sendSync("nomad.terminal.connection", {port: normalizedPort});
+    if (!connection || connection.port !== normalizedPort || !/^[a-f0-9]{64}$/.test(connection.authToken || "")) {
+        throw new Error("Terminal transport authorization unavailable");
+    }
+    return connection;
+}
 
 const settingsDir = remote.app.getPath("userData");
 const themesDir = path.join(settingsDir, "themes");
@@ -492,7 +522,8 @@ async function initUI() {
         </div>`;
     let registryApplications = publicApplications(MANAGED_APPLICATIONS);
     try {
-        const registryState = await ipc.invoke("application-registry-operation", {operation: "get"});
+        const registryState = nomadBridge ? await nomadBridge.applications.request("get")
+            : await ipc.invoke("application-registry-operation", {operation: "get"});
         if (registryState && registryState.ok && Array.isArray(registryState.applications)) {
             registryApplications = registryState.applications;
         }
@@ -574,7 +605,7 @@ async function initUI() {
     });
     window.terminalForegroundControl = new TerminalForegroundControl({
         button: document.getElementById("terminal_stop_foreground"),
-        ipc,
+        ipc: nomadTerminalOperationIpc,
         onResume: () => {
             if (window.workspaceManager.activeSlotId !== "terminal"
                 || !window.term || !window.term[window.currentTerm]) return;
@@ -583,9 +614,10 @@ async function initUI() {
     });
     window.terminalForegroundControl.initialize();
     window.i3WorkspaceClient = new I3WorkspaceClient({
-        ipc,
+        ipc: nomadWindowManagerIpc,
         manager: window.workspaceManager,
         viewport: document.getElementById("workspace_viewport"),
+        getWindowBounds: nomadBridge ? () => nomadBridge.runtime.windowBounds() : null,
         log: (level, message) => console[level](`[workspace] ${message}`),
         onApplicationError: message => {
             if (window.applicationLauncher) window.applicationLauncher.showError(message);
@@ -606,7 +638,8 @@ async function initUI() {
     window.reloadApplicationRegistry = async () => {
         try {
             const activeBeforeReload = window.workspaceManager.activeSlotId;
-            const registryState = await ipc.invoke("application-registry-operation", {operation: "reload"});
+            const registryState = nomadBridge ? await nomadBridge.applications.request("reload")
+                : await ipc.invoke("application-registry-operation", {operation: "reload"});
             if (!registryState || !registryState.ok || !Array.isArray(registryState.applications)) return false;
             window.workspaceManager.setApplications(registryState.applications);
             if (activeBeforeReload && !window.workspaceManager.getApplication(activeBeforeReload)) {
@@ -619,11 +652,13 @@ async function initUI() {
         }
     };
     window.openApplication = id => window.workspaceManager.focus(id);
+    const primaryTerminalConnection = terminalConnection(window.settings.port || 3000);
     window.term = {
         0: new Terminal({
             role: "client",
             parentId: "terminal0",
-            port: window.settings.port || 3000
+            port: primaryTerminalConnection.port,
+            authToken: primaryTerminalConnection.authToken
         })
     };
     window.currentTerm = 0;
@@ -657,12 +692,12 @@ async function initUI() {
         container: "repository_container",
         addTrigger: "repository_add",
         folderIcon,
-        loadRepositories: () => ipc.invoke("repository-operation", {operation: "refresh"}),
-        onclone: repositoryUrl => ipc.invoke("repository-operation", {
-            operation: "clone",
-            repositoryUrl
-        }),
-        oncancelclone: () => ipc.invoke("repository-operation", {operation: "cancel-clone"}),
+        loadRepositories: () => nomadBridge ? nomadBridge.repositories.refresh()
+            : ipc.invoke("repository-operation", {operation: "refresh"}),
+        onclone: repositoryUrl => nomadBridge ? nomadBridge.repositories.clone(repositoryUrl)
+            : ipc.invoke("repository-operation", {operation: "clone", repositoryUrl}),
+        oncancelclone: () => nomadBridge ? nomadBridge.repositories.cancelClone()
+            : ipc.invoke("repository-operation", {operation: "cancel-clone"}),
         onInputCaptureChange: active => {
             if (active) window.nomadInputCapture.acquire("repository-clone");
             else window.nomadInputCapture.release("repository-clone");
@@ -685,7 +720,12 @@ async function initUI() {
                 if (typeof details.authorizationId === "string") request.authorizationId = details.authorizationId;
                 if (typeof details.authorization === "string") request.authorization = details.authorization;
             }
-            const result = await ipc.invoke("repository-operation", request);
+            let result;
+            if (nomadBridge) {
+                const bridgeRequest = Object.assign({}, request);
+                delete bridgeRequest.operation;
+                result = await nomadBridge.repositories.action(bridgeRequest);
+            } else result = await ipc.invoke("repository-operation", request);
             if (!result || !result.ok) return result;
 
             if (result.activateAppId === "terminal") {
@@ -712,19 +752,24 @@ async function initUI() {
     });
     window.refreshRepositories = () => window.repositoryLauncher.refresh();
     let repositoryStateRefresh = null;
-    ipc.on("repository-process-state", () => {
+    const onRepositoryProcessState = () => {
         if (repositoryStateRefresh) return;
         repositoryStateRefresh = window.repositoryLauncher.refresh().finally(() => {
             repositoryStateRefresh = null;
         });
-    });
-    ipc.on("repository-git-state", (event, state) => {
+    };
+    if (nomadBridge) nomadBridge.repositories.onProcessState(onRepositoryProcessState);
+    else ipc.on("repository-process-state", onRepositoryProcessState);
+    const onRepositoryGitState = state => {
         if (window.repositoryLauncher) window.repositoryLauncher.updateGitState(state);
-    });
+    };
+    if (nomadBridge) nomadBridge.repositories.onGitState(onRepositoryGitState);
+    else ipc.on("repository-git-state", (event, state) => onRepositoryGitState(state));
     await window.repositoryLauncher.render();
 
     window.securityHud = new SecurityHud({
-        loadStatus: () => ipc.invoke("security.status", {verbose: false}),
+        loadStatus: () => nomadBridge ? nomadBridge.security.status(false)
+            : ipc.invoke("security.status", {verbose: false}),
         onOpen: () => window.keyboard.detach(),
         onClose: () => {
             if (!document.getElementById("settingsEditor")) {
@@ -800,11 +845,13 @@ window.focusShellTab = number => {
                 document.getElementById("shell_tab"+number).innerHTML = "<p>ERROR</p>";
             } else if (r.startsWith("SUCCESS")) {
                 let port = Number(r.substr(9));
+                const connection = terminalConnection(port);
 
                 window.term[number] = new Terminal({
                     role: "client",
                     parentId: "terminal"+number,
-                    port
+                    port: connection.port,
+                    authToken: connection.authToken
                 });
 
                 window.term[number].onclose = e => {

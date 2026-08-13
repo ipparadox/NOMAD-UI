@@ -68,9 +68,15 @@ USAGE
   nomad security profile
   nomad security profile list
   nomad security profile set <normal|public|lockdown>
+  nomad security plan [normal|public|lockdown] [--verbose]
+  nomad security enforce [normal|public|lockdown] [--apply] [--verbose]
+  nomad security verify [--system]
+  nomad security restore [--apply]
+  nomad security permissions [--verbose]
+  nomad security permissions repair [--apply] [--verbose]
 
-Profile changes apply NOMAD policy and safe user-level gates only.
-No firewall, mount, boot, encryption, or privileged system setting is changed.`;
+Potentially privileged operations are plan-only unless --apply is explicit.
+Real apply requires interactive confirmation and the separately installed narrow helper.`;
 
 function table(headers, rows) {
     const widths = headers.map((header, column) => rows.reduce((width, row) => {
@@ -92,6 +98,37 @@ function defaultConfirmation(input, output) {
 
 function applicationStatus(application) {
     return application.available === false ? "UNAVAILABLE" : "AVAILABLE";
+}
+
+function renderSecurityPlan(write, plan) {
+    write("NOMAD SECURITY ENFORCEMENT PLAN");
+    write("");
+    write(`SELECTED PROFILE: ${plan.selectedProfile}`);
+    write(`TARGET PROFILE: ${plan.targetProfile}`);
+    write(`PREFLIGHT: ${plan.status}`);
+    if (plan.helper) write(`PRIVILEGED HELPER: ${plan.helper.status}`);
+    write("");
+    write(table(["CATEGORY", "CURRENT", "DESIRED", "ACTION", "PRIVILEGED", "AVAILABLE"],
+        (plan.categories || []).map(category => [
+            category.label,
+            category.current,
+            category.desired,
+            category.action,
+            category.privileged ? "YES" : "NO",
+            category.available ? "YES" : "NO"
+        ])));
+    if (plan.firewall && plan.firewall.rules) {
+        write("");
+        write("TRUSTED NFTABLES DRY RUN");
+        write(plan.firewall.rules.trimEnd());
+    }
+    if (plan.storage && Array.isArray(plan.storage.eligibleMounts) && plan.storage.eligibleMounts.length) {
+        write("");
+        write("STRICTLY ELIGIBLE INTERNAL MOUNTS (REVALIDATED IMMEDIATELY BEFORE ACTION)");
+        plan.storage.eligibleMounts.forEach(mountPoint => write(`- ${mountPoint}`));
+    }
+    if (plan.sessionRestartRequired) write("SESSION RESTART REQUIRED");
+    if (plan.privilegedPending) write("SYSTEM ENFORCEMENT PENDING");
 }
 
 function parseLearnArguments(argv) {
@@ -179,6 +216,13 @@ async function runCli(argv, opts = {}) {
         if (!securityCliService) securityCliService = opts.securityCliService || new SecurityCliService(opts);
         return securityCliService;
     };
+    const requireExternalApplicationPolicy = () => {
+        const policy = security().externalApplicationPolicy();
+        if (!policy || policy.allowed !== true) {
+            throw new CliError(policy && policy.status || "APPLICATION POLICY UNAVAILABLE");
+        }
+        return policy;
+    };
 
     try {
         if (!Array.isArray(argv)) throw new TypeError("CLI arguments must be an array");
@@ -236,6 +280,7 @@ async function runCli(argv, opts = {}) {
 
             if (command === "learn") {
                 const learning = parseLearnArguments(argv);
+                requireExternalApplicationPolicy();
                 const result = await learner().learn(learning.identifier, {timeoutMs: learning.timeoutMs});
                 write("WINDOW CLASS LEARNED");
                 write(`APPLICATION: ${result.application.id.toUpperCase()}`);
@@ -371,13 +416,21 @@ async function runCli(argv, opts = {}) {
                 }
                 const result = security().status(verbose);
                 const checks = new Map(result.checks.map(check => [check.id, check]));
-                const rows = [["PROFILE", result.profile.id, result.profile.compliance]];
+                const rows = [
+                    ["SELECTED PROFILE", result.profile.id, result.profile.compliance],
+                    ["ENFORCED PROFILE", result.profile.enforced || "NONE", result.profile.enforcementState || "UNKNOWN"]
+                ];
                 [
                     ["repository_execution", "REPOSITORY EXEC"],
                     ["repository_isolation", "REPOSITORY ISOLATION"],
+                    ["application_execution", "APPLICATION POLICY"],
                     ["firewall", "FIREWALL"],
+                    ["listening_services", "NETWORK LISTENERS"],
                     ["host_storage", "HOST STORAGE"],
                     ["automount", "AUTOMOUNT"],
+                    ["ephemeral_state", "EPHEMERAL STATE"],
+                    ["sensitive_environment", "SECRETS"],
+                    ["renderer_privilege", "RENDERER"],
                     ["disk_encryption", "DISK ENCRYPTION"],
                     ["swap", "SWAP"],
                     ["secure_boot", "SECURE BOOT"],
@@ -392,8 +445,9 @@ async function runCli(argv, opts = {}) {
                 write(table(["CHECK", "ACTUAL", "STATE"], rows));
                 if (result.profile.systemEnforcementPending) {
                     write("");
-                    write("SYSTEM-LEVEL ENFORCEMENT PENDING");
+                    write("SYSTEM ENFORCEMENT PENDING");
                 }
+                if (result.profile.sessionRestartRequired) write("SESSION RESTART REQUIRED");
                 if (verbose) {
                     write("");
                     write("OBSERVED CHECKS");
@@ -420,6 +474,17 @@ async function runCli(argv, opts = {}) {
                         write(`INTERNAL MOUNTS: ${result.hostStorage.internalMountCount}`);
                         write(`REMOVABLE MOUNTS: ${result.hostStorage.removableMountCount}`);
                     }
+                    if (result.firewall) {
+                        write(`FIREWALL BACKEND: ${result.firewall.backend}`);
+                        write(`FIREWALL CURRENT STATE: ${result.firewall.currentState}`);
+                        write(`NOMAD FIREWALL POLICY: ${result.firewall.nomadPolicyState}`);
+                        write(`FIREWALL VERIFICATION: ${result.firewall.verificationResult}`);
+                        write(`FIREWALL IPV4/IPV6: ${result.firewall.ipv4 ? "YES" : "NO"}/${result.firewall.ipv6 ? "YES" : "NO"}`);
+                    }
+                    if (result.environment) {
+                        write(`ENVIRONMENT NAMES: ${result.environment.totalCount}`);
+                        write(`SENSITIVE/RUNTIME-INJECTION NAMES: ${result.environment.sensitiveCount}`);
+                    }
                 }
                 return 0;
             }
@@ -436,6 +501,154 @@ async function runCli(argv, opts = {}) {
                 return 0;
             }
 
+            if (command === "plan") {
+                const verbose = argv.includes("--verbose");
+                const operands = argv.slice(2).filter(argument => argument !== "--verbose");
+                if (operands.length > 1 || operands.some(argument => !/^(normal|public|lockdown)$/i.test(argument))
+                    || argv.some((argument, index) => index > 1 && argument.startsWith("--") && argument !== "--verbose")) {
+                    throw new CliError("USAGE: nomad security plan [normal|public|lockdown] [--verbose]", 2);
+                }
+                const result = security().plan(operands[0], verbose);
+                renderSecurityPlan(write, result);
+                write("");
+                write("PLAN ONLY: NO SETTINGS, FIREWALL RULES, OR MOUNTS WERE CHANGED");
+                return 0;
+            }
+
+            if (command === "enforce") {
+                const apply = argv.includes("--apply");
+                const verbose = argv.includes("--verbose");
+                const operands = argv.slice(2).filter(argument => !["--apply", "--verbose"].includes(argument));
+                if (operands.length > 1 || operands.some(argument => !/^(normal|public|lockdown)$/i.test(argument))
+                    || argv.some((argument, index) => index > 1 && argument.startsWith("--")
+                        && !["--apply", "--verbose"].includes(argument))) {
+                    throw new CliError("USAGE: nomad security enforce [normal|public|lockdown] [--apply] [--verbose]", 2);
+                }
+                const target = operands[0];
+                const plan = security().plan(target, verbose || apply);
+                renderSecurityPlan(write, plan);
+                if (!apply) {
+                    write("");
+                    write("PLAN ONLY: RUN WITH --apply TO REQUEST ENFORCEMENT");
+                    return 0;
+                }
+                if (!plan.safeToApply) {
+                    writeError("ERROR");
+                    writeError(plan.status);
+                    return 1;
+                }
+                const confirm = opts.confirm || (() => defaultConfirmation(stdin, stdout));
+                if (!await confirm(plan)) {
+                    write("ENFORCEMENT CANCELLED");
+                    return 0;
+                }
+                const result = security().enforce(target, true, verbose);
+                write("");
+                write(result.status);
+                if (result.profile) write(`PROFILE: ${result.profile}`);
+                if (result.sessionRestartRequired) write("SESSION RESTART REQUIRED");
+                if (result.systemEnforcementPending) write("SYSTEM ENFORCEMENT PENDING");
+                return result.ok && !result.systemEnforcementPending ? 0 : 1;
+            }
+
+            if (command === "verify") {
+                const system = argv.length === 3 && argv[2] === "--system";
+                if (argv.length > 2 && !system) throw new CliError("USAGE: nomad security verify [--system]", 2);
+                if (system) {
+                    write("PRIVILEGED READ-ONLY SYSTEM VERIFICATION REQUESTED");
+                    write("THE NARROW HELPER WILL INSPECT ONLY ITS OWN FIREWALL POLICY AND RECORDED STORAGE CHANGES");
+                    const confirm = opts.confirm || (() => defaultConfirmation(stdin, stdout));
+                    if (!await confirm({operation: "verify-system", readOnly: true})) {
+                        write("SYSTEM VERIFICATION CANCELLED");
+                        return 0;
+                    }
+                }
+                const result = security().verify(system);
+                write("NOMAD SECURITY ENFORCEMENT VERIFICATION");
+                write("");
+                const rows = [
+                    ["SELECTED PROFILE", result.selectedProfile],
+                    ["DESIRED PROFILE", result.desiredProfile],
+                    ["ENFORCED PROFILE", result.enforcedProfile],
+                    ["PROFILE GATES", result.profileGates ? "VERIFIED" : "FAILED"],
+                    ["FIREWALL", result.firewallVerified ? "VERIFIED" : result.firewall.verificationResult],
+                    ["AUTOMOUNT", result.automount],
+                    ["EPHEMERAL STATE", result.ephemeral],
+                    ["STORAGE OBSERVATION", result.storage.state]
+                ];
+                if (result.systemVerification) {
+                    rows.push(["SYSTEM HELPER", result.systemVerification.status]);
+                    rows.push(["SYSTEM STORAGE", result.systemVerification.storage]);
+                }
+                write(table(["STATE", "ACTUAL"], rows));
+                if (result.sessionRestartRequired) write("SESSION RESTART REQUIRED");
+                if (result.systemEnforcementPending) write("SYSTEM ENFORCEMENT PENDING");
+                return result.profileGates && !result.systemEnforcementPending ? 0 : 1;
+            }
+
+            if (command === "restore") {
+                const apply = argv.length === 3 && argv[2] === "--apply";
+                if (argv.length > 2 && !apply) throw new CliError("USAGE: nomad security restore [--apply]", 2);
+                const plan = security().restore(false, false);
+                write("NOMAD SECURITY RESTORE PLAN");
+                write("");
+                (plan.actions || []).forEach(action => write(`- ${action}`));
+                if (!apply) {
+                    write("PLAN ONLY: RUN WITH --apply TO RESTORE NOMAD-OWNED CHANGES");
+                    return 0;
+                }
+                const confirm = opts.confirm || (() => defaultConfirmation(stdin, stdout));
+                if (!await confirm(plan)) {
+                    write("RESTORE CANCELLED");
+                    return 0;
+                }
+                const result = security().restore(true, true);
+                write(result.status);
+                if (result.profile) write(`PROFILE: ${result.profile}`);
+                if (result.sessionRestartRequired) write("SESSION RESTART REQUIRED");
+                return result.ok ? 0 : 1;
+            }
+
+            if (command === "permissions") {
+                const repair = argv[2] === "repair";
+                const apply = argv.includes("--apply");
+                const verbose = argv.includes("--verbose");
+                const allowed = repair ? new Set(["repair", "--apply", "--verbose"]) : new Set(["--verbose"]);
+                if (argv.slice(2).some(argument => !allowed.has(argument)) || (!repair && apply)) {
+                    throw new CliError("USAGE: nomad security permissions [--verbose]\n       nomad security permissions repair [--apply] [--verbose]", 2);
+                }
+                if (!repair) {
+                    const result = security().permissions(verbose);
+                    write("NOMAD SECURITY PERMISSIONS");
+                    write("");
+                    write(table(["RESOURCE", "ACTUAL", "DESIRED", "STATUS"], result.resources.map(resource => [
+                        resource.label, resource.actualMode || "-", resource.desiredMode, resource.status
+                    ])));
+                    write(`FINDINGS: ${result.findingCount}`);
+                    return result.findingCount ? 1 : 0;
+                }
+                const plan = security().repairPermissions(false, false, verbose);
+                write("NOMAD PERMISSION REPAIR PLAN");
+                write("");
+                if (!plan.actions.length) write("NO MODE REPAIRS REQUIRED");
+                else write(table(["RESOURCE", "CURRENT", "DESIRED"], plan.actions.map(action => [
+                    action.label, action.currentMode, action.desiredMode
+                ])));
+                if (!apply) {
+                    write("PLAN ONLY: RUN WITH --apply TO REPAIR KNOWN NOMAD RESOURCES");
+                    return 0;
+                }
+                const confirm = opts.confirm || (() => defaultConfirmation(stdin, stdout));
+                if (!await confirm(plan)) {
+                    write("PERMISSION REPAIR CANCELLED");
+                    return 0;
+                }
+                const result = security().repairPermissions(true, true, verbose);
+                write(result.status);
+                write(`REPAIRED: ${(result.repaired || []).length}`);
+                return result.ok ? 0 : 1;
+            }
+
             if (command === "profile") {
                 if (argv.length === 2) {
                     const result = security().profile();
@@ -444,7 +657,9 @@ async function runCli(argv, opts = {}) {
                     write(`PROFILE: ${result.profile}`);
                     write(`SOURCE: ${result.source}`);
                     write(`COMPLIANCE: ${result.compliance}`);
-                    if (result.systemEnforcementPending) write("SYSTEM-LEVEL ENFORCEMENT PENDING");
+                    if (result.enforced) write(`ENFORCED: ${result.enforced} (${result.enforcementState || "UNKNOWN"})`);
+                    if (result.systemEnforcementPending) write("SYSTEM ENFORCEMENT PENDING");
+                    if (result.sessionRestartRequired) write("SESSION RESTART REQUIRED");
                     return 0;
                 }
                 if (argv.length === 3 && argv[2] === "list") {
@@ -465,7 +680,8 @@ async function runCli(argv, opts = {}) {
                     write("PROFILE CHANGED");
                     write(`PROFILE: ${result.profile}`);
                     write(`COMPLIANCE: ${result.compliance}`);
-                    if (result.systemEnforcementPending) write("SYSTEM-LEVEL ENFORCEMENT PENDING");
+                    if (result.systemEnforcementPending) write("SYSTEM ENFORCEMENT PENDING");
+                    if (result.sessionRestartRequired) write("SESSION RESTART REQUIRED");
                     return 0;
                 }
                 throw new CliError("USAGE: nomad security profile [list|set <normal|public|lockdown>]", 2);
@@ -506,6 +722,7 @@ async function runCli(argv, opts = {}) {
                 return 0;
             }
 
+            requireExternalApplicationPolicy();
             await installer().apply(plan);
             write("INSTALL COMPLETE");
             return registerInstalledApplication(write, installer(), definition) ? 0 : 1;

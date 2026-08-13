@@ -193,7 +193,7 @@ function cloneApplication(application) {
     return cloned;
 }
 
-function handleApplicationRegistryRequest(registry, windowManager, request) {
+function handleApplicationRegistryRequest(registry, windowManager, request, applicationPolicy) {
     if (!request || !isPlainObject(request) || Object.keys(request).some(key => key !== "operation")) {
         return {ok: false, status: "INVALID REQUEST", applications: []};
     }
@@ -207,7 +207,8 @@ function handleApplicationRegistryRequest(registry, windowManager, request) {
         ok: true,
         status: request.operation === "reload" ? "REGISTRY RELOADED" : "REGISTRY LOADED",
         generation: registry.generation,
-        applications: registry.getPublicApplications()
+        applications: applicationPolicy
+            ? applicationPolicy.projectAll(registry.getApplications()) : registry.getPublicApplications()
     };
 }
 

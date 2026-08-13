@@ -4,6 +4,7 @@ class I3WorkspaceClient {
         this.manager = opts.manager;
         this.viewport = opts.viewport;
         this.log = opts.log || (() => {});
+        this.getWindowBounds = typeof opts.getWindowBounds === "function" ? opts.getWindowBounds : null;
         this.onApplicationError = typeof opts.onApplicationError === "function" ? opts.onApplicationError : (() => {});
         this.requestId = 0;
         this.pendingRequests = {};
@@ -58,7 +59,8 @@ class I3WorkspaceClient {
 
     geometry() {
         const rect = this.viewport.getBoundingClientRect();
-        const bounds = require("@electron/remote").getCurrentWindow().getContentBounds();
+        const bounds = this.getWindowBounds
+            ? this.getWindowBounds() : require("@electron/remote").getCurrentWindow().getContentBounds();
         const scaleX = bounds.width / document.documentElement.clientWidth;
         const scaleY = bounds.height / document.documentElement.clientHeight;
         return {

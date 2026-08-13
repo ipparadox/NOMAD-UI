@@ -77,8 +77,10 @@ async function run() {
     const spawnCalls = [];
     const child = new EventEmitter();
     child.unref = () => {};
+    const applicationEnvironment = {PATH: "/usr/bin", LANG: "C"};
     const launchManager = new I3WindowManager({
         applications,
+        env: applicationEnvironment,
         spawn: (executable, args, options) => {
             spawnCalls.push({executable, args, options});
             return child;
@@ -88,7 +90,7 @@ async function run() {
     assert.deepStrictEqual(spawnCalls, [{
         executable: "spotify",
         args: ["--uri=literal;not-shell"],
-        options: {detached: true, stdio: "ignore", shell: false}
+        options: {detached: true, stdio: "ignore", shell: false, env: applicationEnvironment}
     }]);
     child.emit("exit", 0);
 

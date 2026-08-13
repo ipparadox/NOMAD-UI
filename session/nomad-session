@@ -1,17 +1,184 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 
 set -u
 umask 077
+readonly NOMAD_SYSTEM_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-readonly NOMAD_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/nomad"
+# Re-exec before running any external utility so the session launcher itself,
+# not only Electron, starts from a credential-free allowlist. The production
+# desktop entry never supplies the private marker argument.
+if [[ "${1:-}" != "--nomad-clean-environment" ]]; then
+    if [[ "$#" -gt 1 || ( "$#" -eq 1 && "$1" != "--launch-ui" ) ]]; then
+        printf 'Unknown NOMAD session launcher argument\n' >&2
+        exit 2
+    fi
+    readonly initial_argument="${1:-}"
+    declare -a initial_environment=(
+        "HOME=${HOME:-}"
+        "USER=${USER:-}"
+        "LOGNAME=${LOGNAME:-${USER:-}}"
+        "SHELL=${SHELL:-/bin/bash}"
+        "PATH=$NOMAD_SYSTEM_PATH"
+        "LANG=${LANG:-C.UTF-8}"
+        "TERM=${TERM:-xterm-256color}"
+        "DISPLAY=${DISPLAY:-}"
+        "XAUTHORITY=${XAUTHORITY:-}"
+        "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-}"
+        "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-}"
+        "XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-x11}"
+        "XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP:-NOMAD}"
+        "XDG_SESSION_DESKTOP=${XDG_SESSION_DESKTOP:-NOMAD}"
+        "XDG_SESSION_CLASS=${XDG_SESSION_CLASS:-user}"
+        "XDG_SESSION_ID=${XDG_SESSION_ID:-}"
+        "XDG_SEAT=${XDG_SEAT:-}"
+        "XDG_VTNR=${XDG_VTNR:-}"
+        "XDG_DATA_DIRS=${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+        "XDG_CONFIG_DIRS=${XDG_CONFIG_DIRS:-/etc/xdg}"
+        "XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-${HOME:-}/.config}"
+        "XDG_STATE_HOME=${XDG_STATE_HOME:-${HOME:-}/.local/state}"
+        "XDG_CACHE_HOME=${XDG_CACHE_HOME:-${HOME:-}/.cache}"
+        "DESKTOP_SESSION=${DESKTOP_SESSION:-nomad}"
+        "I3SOCK=${I3SOCK:-}"
+    )
+    [[ -n "${LANGUAGE:-}" ]] && initial_environment+=("LANGUAGE=$LANGUAGE")
+    [[ -n "${COLORTERM:-}" ]] && initial_environment+=("COLORTERM=$COLORTERM")
+    [[ -n "${TZ:-}" ]] && initial_environment+=("TZ=$TZ")
+    while IFS= read -r locale_name; do
+        [[ "$locale_name" =~ ^LC_[A-Z0-9_]+$ ]] || continue
+        initial_environment+=("$locale_name=${!locale_name}")
+    done < <(compgen -A variable LC_ || true)
+    if [[ -n "$initial_argument" ]]; then
+        exec /usr/bin/env -i "${initial_environment[@]}" /bin/bash -p -- "$0" \
+            --nomad-clean-environment "$initial_argument"
+    fi
+    exec /usr/bin/env -i "${initial_environment[@]}" /bin/bash -p -- "$0" \
+        --nomad-clean-environment
+fi
+shift
+
+PATH="$NOMAD_SYSTEM_PATH"
+export PATH
+
 readonly NOMAD_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nomad"
-readonly NOMAD_SESSION_LOG="$NOMAD_STATE_DIR/session.log"
-readonly NOMAD_UI_LOG="$NOMAD_STATE_DIR/ui.log"
+readonly NOMAD_PERSISTENT_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/nomad"
 
-mkdir -p "$NOMAD_STATE_DIR"
+ensure_private_directory() {
+    local directory="$1"
+    local canonical=""
+    local existing="$directory"
+    local existing_mode=""
+    [[ "$directory" == /* && ! -L "$directory" ]] || return 1
+    while [[ ! -e "$existing" && ! -L "$existing" ]]; do
+        [[ "$existing" != "/" ]] || break
+        existing="$(dirname -- "$existing")"
+    done
+    [[ -d "$existing" && ! -L "$existing" && -O "$existing" ]] || return 1
+    existing_mode="$(stat -c '%a' -- "$existing" 2>/dev/null || true)"
+    [[ "$existing_mode" =~ ^[0-7]{3,4}$ && $((8#$existing_mode & 022)) -eq 0 ]] || return 1
+    [[ "$(readlink -f -- "$existing" 2>/dev/null || true)" == "$existing" ]] || return 1
+    mkdir -p -- "$directory" || return 1
+    [[ -d "$directory" && ! -L "$directory" && -O "$directory" ]] || return 1
+    canonical="$(readlink -f -- "$directory" 2>/dev/null || true)"
+    [[ "$canonical" == "$directory" ]] || return 1
+    chmod 0700 -- "$directory"
+}
+
+prepare_private_log() {
+    local filename="$1"
+    local links=""
+    if [[ -e "$filename" || -L "$filename" ]]; then
+        links="$(stat -c '%h' -- "$filename" 2>/dev/null || true)"
+        [[ -f "$filename" && ! -L "$filename" && -O "$filename" && "$links" == "1" ]] || return 1
+    else
+        (set -o noclobber; : >"$filename") 2>/dev/null || return 1
+    fi
+    chmod 0600 -- "$filename"
+}
+
+ensure_private_directory "$NOMAD_CONFIG_DIR" || {
+    printf 'NOMAD refused an unsafe configuration directory\n' >&2
+    exit 1
+}
+
+read_security_profile() {
+    local profile_file="$NOMAD_CONFIG_DIR/security.json"
+    local profile_mode=""
+    local profile=""
+    if [[ ! -e "$profile_file" && ! -L "$profile_file" ]]; then
+        printf 'NORMAL'
+        return 0
+    fi
+    profile_mode="$(stat -c '%a' -- "$profile_file" 2>/dev/null || true)"
+    if [[ -L "$profile_file" || ! -f "$profile_file" || ! -O "$profile_file" || ! -r "$profile_file" \
+        || ! "$profile_mode" =~ ^[0-7]{3,4}$ || $((8#$profile_mode & 077)) -ne 0 ]]; then
+        printf 'UNKNOWN'
+        return 0
+    fi
+    profile="$(sed -nE 's/^[[:space:]]*"profile"[[:space:]]*:[[:space:]]*"(NORMAL|PUBLIC|LOCKDOWN)"[[:space:]]*,?[[:space:]]*$/\1/p' -- "$profile_file")"
+    if [[ "$profile" == *$'\n'* || ! "$profile" =~ ^(NORMAL|PUBLIC|LOCKDOWN)$ ]]; then
+        printf 'UNKNOWN'
+        return 0
+    fi
+    printf '%s' "$profile"
+}
+
+runtime_is_volatile() {
+    local runtime_path="${XDG_RUNTIME_DIR:-}"
+    local runtime_mode=""
+    local runtime_fstype=""
+    [[ -n "$runtime_path" && "$runtime_path" == /* && -d "$runtime_path" && ! -L "$runtime_path" && -O "$runtime_path" ]] || return 1
+    runtime_mode="$(stat -c '%a' -- "$runtime_path" 2>/dev/null || true)"
+    [[ "$runtime_mode" =~ ^[0-7]{3,4}$ && $((8#$runtime_mode & 077)) -eq 0 ]] || return 1
+    runtime_fstype="$(findmnt -n -o FSTYPE --target "$runtime_path" 2>/dev/null || true)"
+    [[ "$runtime_fstype" == "tmpfs" || "$runtime_fstype" == "ramfs" ]]
+}
+
+NOMAD_SECURITY_PROFILE="$(read_security_profile)"
+if [[ "$NOMAD_SECURITY_PROFILE" == "UNKNOWN" ]]; then
+    NOMAD_SECURITY_PROFILE="NORMAL"
+    NOMAD_PROFILE_INVALID=1
+else
+    NOMAD_PROFILE_INVALID=0
+fi
+
+NOMAD_EPHEMERAL_ACTIVE=0
+NOMAD_RUNTIME_ROOT="$NOMAD_PERSISTENT_STATE_DIR"
+if [[ "$NOMAD_SECURITY_PROFILE" == "PUBLIC" || "$NOMAD_SECURITY_PROFILE" == "LOCKDOWN" ]]; then
+    if runtime_is_volatile; then
+        NOMAD_EPHEMERAL_ACTIVE=1
+        NOMAD_RUNTIME_ROOT="$XDG_RUNTIME_DIR/nomad"
+    fi
+fi
+if [[ "$NOMAD_EPHEMERAL_ACTIVE" == "1" ]]; then
+    NOMAD_RUNTIME_STATE_DIR="$NOMAD_RUNTIME_ROOT/state"
+    NOMAD_LOG_ROOT="$NOMAD_RUNTIME_ROOT/log"
+else
+    NOMAD_RUNTIME_STATE_DIR="$NOMAD_PERSISTENT_STATE_DIR"
+    NOMAD_LOG_ROOT="$NOMAD_PERSISTENT_STATE_DIR"
+fi
+readonly NOMAD_SECURITY_PROFILE NOMAD_EPHEMERAL_ACTIVE NOMAD_RUNTIME_ROOT NOMAD_PROFILE_INVALID
+readonly NOMAD_RUNTIME_STATE_DIR NOMAD_LOG_ROOT
+readonly NOMAD_SESSION_LOG="$NOMAD_LOG_ROOT/session.log"
+readonly NOMAD_UI_LOG="$NOMAD_LOG_ROOT/ui.log"
+
+for private_directory in "$NOMAD_PERSISTENT_STATE_DIR" "$NOMAD_LOG_ROOT" "$NOMAD_RUNTIME_STATE_DIR"; do
+    ensure_private_directory "$private_directory" || {
+        printf 'NOMAD refused an unsafe runtime directory\n' >&2
+        exit 1
+    }
+done
+prepare_private_log "$NOMAD_SESSION_LOG" || {
+    printf 'NOMAD refused an unsafe session log\n' >&2
+    exit 1
+}
+prepare_private_log "$NOMAD_UI_LOG" || {
+    printf 'NOMAD refused an unsafe UI log\n' >&2
+    exit 1
+}
 
 log() {
     printf '%s %s\n' "$(date --iso-8601=seconds)" "$*" >>"$NOMAD_SESSION_LOG"
+    chmod 0600 "$NOMAD_SESSION_LOG" 2>/dev/null || true
 }
 
 stop_session() {
@@ -22,56 +189,141 @@ stop_session() {
 launch_ui() {
     local nomad_root="${NOMAD_ROOT:-$HOME/Projects/NOMAD-UI}"
     local nvm_dir="${NVM_DIR:-$HOME/.nvm}"
+    local env_valid=1
+
+    parse_override_value() {
+        local value="$1"
+        if [[ "$value" == \"*\" && ${#value} -ge 2 ]]; then
+            value="${value:1:${#value}-2}"
+        fi
+        if [[ "$value" == '$HOME' ]]; then
+            value="$HOME"
+        elif [[ "$value" == '$HOME/'* ]]; then
+            value="$HOME/${value:6}"
+        elif [[ "$value" == '~/'* ]]; then
+            value="$HOME/${value:2}"
+        fi
+        [[ "$value" == /* && "$value" =~ ^/[A-Za-z0-9._+@%/\ -]+$ ]] || return 1
+        printf '%s' "$value"
+    }
 
     if [[ -e "$NOMAD_CONFIG_DIR/session.env" || -L "$NOMAD_CONFIG_DIR/session.env" ]]; then
         local env_permissions=""
-        env_permissions="$(stat -c '%A' -- "$NOMAD_CONFIG_DIR/session.env" 2>/dev/null || true)"
+        env_permissions="$(stat -c '%a' -- "$NOMAD_CONFIG_DIR/session.env" 2>/dev/null || true)"
         if [[ -L "$NOMAD_CONFIG_DIR/session.env" || ! -f "$NOMAD_CONFIG_DIR/session.env" \
             || ! -O "$NOMAD_CONFIG_DIR/session.env" || ! -r "$NOMAD_CONFIG_DIR/session.env" \
-            || "${env_permissions:5:1}" == "w" || "${env_permissions:8:1}" == "w" ]]; then
+            || ! "$env_permissions" =~ ^[0-7]{3,4}$ || $((8#$env_permissions & 077)) -ne 0 ]]; then
             log "Refusing unsafe session.env; using default session paths"
         else
-            # This verified user-owned regular file contains optional shell syntax.
-            # shellcheck source=/dev/null
-            source "$NOMAD_CONFIG_DIR/session.env"
-            nomad_root="${NOMAD_ROOT:-$nomad_root}"
-            nvm_dir="${NVM_DIR:-$nvm_dir}"
+            local override_line=""
+            local override_key=""
+            local override_value=""
+            local parsed_value=""
+            while IFS= read -r override_line || [[ -n "$override_line" ]]; do
+                [[ -z "$override_line" || "$override_line" =~ ^[[:space:]]*# ]] && continue
+                if [[ ! "$override_line" =~ ^(NOMAD_ROOT|NVM_DIR)=(.*)$ ]]; then
+                    env_valid=0
+                    break
+                fi
+                override_key="${BASH_REMATCH[1]}"
+                override_value="${BASH_REMATCH[2]}"
+                parsed_value="$(parse_override_value "$override_value")" || {
+                    env_valid=0
+                    break
+                }
+                if [[ "$override_key" == "NOMAD_ROOT" ]]; then
+                    nomad_root="$parsed_value"
+                else
+                    nvm_dir="$parsed_value"
+                fi
+            done <"$NOMAD_CONFIG_DIR/session.env"
+            if [[ "$env_valid" != "1" ]]; then
+                nomad_root="${NOMAD_ROOT:-$HOME/Projects/NOMAD-UI}"
+                nvm_dir="${NVM_DIR:-$HOME/.nvm}"
+                log "Refusing unsafe session.env; using default session paths"
+            fi
         fi
     fi
 
     exec >>"$NOMAD_UI_LOG" 2>&1
-    log "Starting NOMAD-UI from $nomad_root"
+    log "Starting NOMAD-UI"
+
+    if [[ "$NOMAD_PROFILE_INVALID" == "1" ]]; then
+        log "Security profile store invalid; safe NORMAL session routing selected and compliance remains unknown"
+    elif [[ "$NOMAD_SECURITY_PROFILE" != "NORMAL" && "$NOMAD_EPHEMERAL_ACTIVE" != "1" ]]; then
+        log "Restricted profile selected but volatile runtime unavailable; compliance remains pending"
+    fi
 
     if [[ ! -f "$nomad_root/package.json" ]]; then
-        log "NOMAD root is invalid: $nomad_root"
+        log "NOMAD root is invalid"
         stop_session
         return 1
     fi
     if [[ ! -s "$nvm_dir/nvm.sh" ]]; then
-        log "NVM was not found at $nvm_dir/nvm.sh"
+        log "Required Node runtime manager was not found"
         stop_session
         return 1
     fi
 
-    export NVM_DIR="$nvm_dir"
-    export NOMAD_PRODUCTION=1
-    unset NODE_OPTIONS NODE_PATH ELECTRON_RUN_AS_NODE BASH_ENV ENV
-    # shellcheck source=/dev/null
-    source "$NVM_DIR/nvm.sh"
-    if ! nvm use 14; then
-        log "The legacy Node 14 runtime is not installed in NVM"
-        stop_session
-        return 1
-    fi
+    local -a session_environment=(
+        "HOME=$HOME"
+        "USER=${USER:-}"
+        "LOGNAME=${LOGNAME:-${USER:-}}"
+        "SHELL=${SHELL:-/bin/bash}"
+        "PATH=$PATH"
+        "LANG=${LANG:-C.UTF-8}"
+        "TERM=${TERM:-xterm-256color}"
+        "DISPLAY=${DISPLAY:-}"
+        "XAUTHORITY=${XAUTHORITY:-}"
+        "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-}"
+        "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-}"
+        "XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-x11}"
+        "XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP:-NOMAD}"
+        "XDG_SESSION_DESKTOP=${XDG_SESSION_DESKTOP:-NOMAD}"
+        "XDG_SESSION_CLASS=${XDG_SESSION_CLASS:-user}"
+        "XDG_SESSION_ID=${XDG_SESSION_ID:-}"
+        "XDG_SEAT=${XDG_SEAT:-}"
+        "XDG_VTNR=${XDG_VTNR:-}"
+        "XDG_DATA_DIRS=${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+        "XDG_CONFIG_DIRS=${XDG_CONFIG_DIRS:-/etc/xdg}"
+        "XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}"
+        "XDG_STATE_HOME=${XDG_STATE_HOME:-$HOME/.local/state}"
+        "XDG_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}"
+        "DESKTOP_SESSION=nomad"
+        "I3SOCK=${I3SOCK:-}"
+        "NOMAD_PRODUCTION=1"
+        "NOMAD_ROOT=$nomad_root"
+        "NOMAD_SESSION_PROFILE=$NOMAD_SECURITY_PROFILE"
+        "NOMAD_EPHEMERAL_ACTIVE=$NOMAD_EPHEMERAL_ACTIVE"
+        "NOMAD_RUNTIME_ROOT=$NOMAD_RUNTIME_ROOT"
+        "NOMAD_RUNTIME_STATE_DIR=$NOMAD_RUNTIME_STATE_DIR"
+        "NOMAD_LOG_ROOT=$NOMAD_LOG_ROOT"
+    )
+    [[ -n "${LANGUAGE:-}" ]] && session_environment+=("LANGUAGE=$LANGUAGE")
+    [[ -n "${COLORTERM:-}" ]] && session_environment+=("COLORTERM=$COLORTERM")
+    [[ -n "${TZ:-}" ]] && session_environment+=("TZ=$TZ")
+    local locale_name=""
+    while IFS= read -r locale_name; do
+        [[ "$locale_name" =~ ^LC_[A-Z0-9_]+$ ]] || continue
+        session_environment+=("$locale_name=${!locale_name}")
+    done < <(compgen -A variable LC_ || true)
 
-    cd "$nomad_root" || {
-        log "Could not enter NOMAD root: $nomad_root"
-        stop_session
-        return 1
-    }
-
-    npm start
+    local bootstrap_script='set -u
+# shellcheck source=/dev/null
+source "$NOMAD_BOOTSTRAP_NVM_DIR/nvm.sh"
+nvm use 14 || exit 78
+unset NOMAD_BOOTSTRAP_NVM_DIR NVM_DIR NVM_BIN NVM_INC NODE_OPTIONS NODE_PATH ELECTRON_RUN_AS_NODE BASH_ENV ENV
+cd -- "$NOMAD_ROOT" || exit 79
+exec npm start'
+    env -i "${session_environment[@]}" \
+        "NOMAD_BOOTSTRAP_NVM_DIR=$nvm_dir" \
+        /bin/bash --noprofile --norc -c "$bootstrap_script"
     status=$?
+    if [[ "$status" == "78" ]]; then
+        log "The legacy Node 14 runtime is not installed in NVM"
+    elif [[ "$status" == "79" ]]; then
+        log "Could not enter NOMAD root"
+    fi
     log "NOMAD-UI exited with status $status"
     stop_session
     return "$status"
@@ -88,7 +340,7 @@ start_session() {
         return 1
     fi
     if [[ ! -r "$config" ]]; then
-        log "Dedicated i3 configuration is missing: $config"
+        log "Dedicated i3 configuration is missing"
         return 1
     fi
 
