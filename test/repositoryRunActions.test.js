@@ -197,7 +197,9 @@ async function run() {
         assert.deepStrictEqual(confirmation.prompt.fields, [
             {label: "PROFILE", value: "NPM DEV"},
             {label: "EXECUTABLE", value: "npm"},
-            {label: "ARGUMENTS", value: "run dev"}
+            {label: "ARGUMENTS", value: "run dev"},
+            {label: "SECURITY", value: "NORMAL"},
+            {label: "ISOLATION", value: "NONE"}
         ]);
         assert.strictEqual(processManager.starts.length, 0);
 

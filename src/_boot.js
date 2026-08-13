@@ -55,6 +55,14 @@ const {
 } = require("./classes/repositoryService.js");
 const {RepositoryRunProfileService} = require("./classes/repositoryRunProfileService.js");
 const {RepositoryProcessManager} = require("./classes/repositoryProcessManager.js");
+const {RepositoryIsolationService} = require("./classes/repositoryIsolationService.js");
+const {SecurityProfileService} = require("./classes/securityProfileService.js");
+const {
+    SecurityService,
+    handleSecurityProfileGetRequest,
+    handleSecurityProfileSetRequest,
+    handleSecurityStatusRequest
+} = require("./classes/securityService.js");
 const {handleTerminalOperation} = require("./classes/terminalForegroundProcessController.js");
 
 ipc.on("log", (e, type, content) => {
@@ -63,8 +71,10 @@ ipc.on("log", (e, type, content) => {
 
 var win, tty, extraTtys, i3WindowManager, applicationRegistry, repositoryService, repositoryActions, repositoryGitService;
 var repositoryRunProfiles, repositoryProcessManager;
+var repositoryIsolationService, securityProfileService, securityService;
 let repositoryShutdownComplete = false;
 let repositoryShutdownPromise = null;
+const productionMode = process.env.NOMAD_PRODUCTION === "1";
 const settingsFile = path.join(electron.app.getPath("userData"), "settings.json");
 const shortcutsFile = path.join(electron.app.getPath("userData"), "shortcuts.json");
 const lastWindowStateFile = path.join(electron.app.getPath("userData"), "lastWindowState.json");
@@ -215,7 +225,7 @@ function createWindow(settings) {
         frame: settings.allowWindowed || false,
         backgroundColor: '#000000',
         webPreferences: {
-            devTools: true,
+            devTools: !productionMode,
 	    enableRemoteModule: true,
             contextIsolation: false,
             backgroundThrottling: false,
@@ -277,6 +287,26 @@ app.on('ready', async () => {
         TERM_PROGRAM_VERSION: app.getVersion()
     }, settings.env);
 
+    securityProfileService = new SecurityProfileService();
+    repositoryIsolationService = new RepositoryIsolationService({env: cleanEnv});
+    securityService = new SecurityService({
+        profileService: securityProfileService,
+        isolationService: repositoryIsolationService,
+        repositoryRoot: settings.repositoryRoot,
+        hasActiveRepositoryProcesses: () => repositoryProcessManager
+            ? repositoryProcessManager.hasActive() : null,
+        productionMode,
+        debugConfiguration: {
+            devTools: !productionMode,
+            nodeIntegration: true,
+            enableRemoteModule: true,
+            experimentalFeatures: settings.experimentalFeatures === true
+        }
+    });
+    ipc.handle("security.status", (event, request) => handleSecurityStatusRequest(securityService, request));
+    ipc.handle("security.profile.get", (event, request) => handleSecurityProfileGetRequest(securityService, request));
+    ipc.handle("security.profile.set", (event, request) => handleSecurityProfileSetRequest(securityService, request));
+
     signale.pending(`Creating new terminal process on port ${settings.port || '3000'}`);
     tty = new Terminal({
         role: "server",
@@ -324,6 +354,8 @@ app.on('ready', async () => {
     });
     repositoryProcessManager = new RepositoryProcessManager({
         env: cleanEnv,
+        isolationService: repositoryIsolationService,
+        getSecurityProfile: () => securityProfileService.get().profile,
         log: (level, message) => signale[level](message),
         onState: state => {
             if (win && !win.isDestroyed()) win.webContents.send("repository-process-state", state);
@@ -457,6 +489,11 @@ app.on('ready', async () => {
 });
 
 app.on('web-contents-created', (e, contents) => {
+    if (productionMode) {
+        contents.on("devtools-opened", () => {
+            if (!contents.isDestroyed()) contents.closeDevTools();
+        });
+    }
     // Prevent creating more than one window
     contents.on('new-window', (e, url) => {
         e.preventDefault();

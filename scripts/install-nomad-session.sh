@@ -43,6 +43,11 @@ if [[ ! -e "$USER_MARKER" && -e "$USER_I3_CONFIG" ]]; then
     exit 1
 fi
 
+if [[ -L "$USER_ENV" || ( -e "$USER_ENV" && ! -f "$USER_ENV" ) ]]; then
+    printf 'Refusing an unsafe NOMAD session environment file: %s\n' "$USER_ENV" >&2
+    exit 1
+fi
+
 if [[ -e "$USER_CLI_MARKER" || -L "$USER_CLI_MARKER" ]]; then
     [[ -f "$USER_CLI_MARKER" && ! -L "$USER_CLI_MARKER" ]] || {
         printf 'Refusing an unsafe NOMAD CLI marker: %s\n' "$USER_CLI_MARKER" >&2
@@ -74,7 +79,7 @@ if [[ ! -e "$USER_ENV" ]]; then
         '# Optional NOMAD session overrides (shell syntax).' \
         '# NOMAD_ROOT="$HOME/Projects/NOMAD-UI"' \
         '# NVM_DIR="$HOME/.nvm"' >"$USER_ENV"
-    chmod 0644 "$USER_ENV"
+    chmod 0600 "$USER_ENV"
 fi
 install -m 0644 /dev/null "$USER_MARKER"
 

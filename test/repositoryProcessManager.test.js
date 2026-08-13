@@ -7,6 +7,7 @@ const {
     RepositoryProcessManager,
     buildRepositoryRunEnvironment
 } = require("../src/classes/repositoryProcessManager.js");
+const {RepositoryIsolationService} = require("../src/classes/repositoryIsolationService.js");
 
 function fakeChild(pid) {
     const child = new EventEmitter();
@@ -27,6 +28,14 @@ function alive(pid) {
     } catch (error) {
         return error.code !== "ESRCH";
     }
+}
+
+function directIsolation(runtimeRoot, environment = process.env) {
+    return new RepositoryIsolationService({
+        env: environment,
+        runtimeRoot,
+        probeBackend: () => false
+    });
 }
 
 async function run() {
@@ -68,17 +77,20 @@ async function run() {
         const spawnCalls = [];
         const children = [];
         const signals = [];
+        const managerEnvironment = {
+            PATH: process.env.PATH,
+            HOME: temporaryRoot,
+            LANG: "C.UTF-8",
+            NODE_OPTIONS: "--require=/tmp/never.js",
+            REPOSITORY_SECRET: "must-not-inherit",
+            API_TOKEN: "must-not-inherit"
+        };
+        const managerRuntimeRoot = path.join(temporaryRoot, "manager-runtime");
         const manager = new RepositoryProcessManager({
             stateRoot,
             platform: "linux",
-            env: {
-                PATH: process.env.PATH,
-                HOME: temporaryRoot,
-                LANG: "C.UTF-8",
-                NODE_OPTIONS: "--require=/tmp/never.js",
-                REPOSITORY_SECRET: "must-not-inherit",
-                API_TOKEN: "must-not-inherit"
-            },
+            env: managerEnvironment,
+            isolationService: directIsolation(managerRuntimeRoot, managerEnvironment),
             resolveExecutable: () => process.execPath,
             spawn: (executable, args, options) => {
                 const child = fakeChild(4100 + children.length);
@@ -93,6 +105,9 @@ async function run() {
 
         const started = manager.start(repository, profile);
         assert.strictEqual(started.status, "RUNNING");
+        assert.strictEqual(started.process.securityProfile, "NORMAL");
+        assert.strictEqual(started.process.isolationLevel, "NONE");
+        assert.strictEqual(started.process.isolationBackend, "DIRECT");
         assert.strictEqual(spawnCalls.length, 1);
         assert.strictEqual(spawnCalls[0].executable, fs.realpathSync(process.execPath));
         assert.deepStrictEqual(spawnCalls[0].args, ["run", "dev; touch NEVER"], "arguments must remain discrete literals");
@@ -102,7 +117,13 @@ async function run() {
         assert.strictEqual(spawnCalls[0].options.env.REPOSITORY_SECRET, undefined);
         assert.strictEqual(spawnCalls[0].options.env.API_TOKEN, undefined);
         assert.strictEqual(spawnCalls[0].options.env.NODE_OPTIONS, undefined);
-        assert.strictEqual(spawnCalls[0].options.env.HOME, temporaryRoot);
+        const isolatedRuntime = path.dirname(spawnCalls[0].options.env.HOME);
+        assert(isolatedRuntime.startsWith(`${managerRuntimeRoot}${path.sep}${repository.id}-`));
+        assert.notStrictEqual(spawnCalls[0].options.env.HOME, temporaryRoot);
+        assert.strictEqual(spawnCalls[0].options.env.XDG_CONFIG_HOME, path.join(isolatedRuntime, "config"));
+        assert.strictEqual(spawnCalls[0].options.env.XDG_CACHE_HOME, path.join(isolatedRuntime, "cache"));
+        assert.strictEqual(spawnCalls[0].options.env.DISPLAY, undefined);
+        assert.strictEqual(spawnCalls[0].options.env.XDG_RUNTIME_DIR, undefined);
         assert.strictEqual(fs.existsSync(path.join(temporaryRoot, "NEVER")), false);
         assert.strictEqual(manager.records.get(repository.id).logPath, path.join(stateRoot, repository.id, "run.log"));
 
@@ -126,6 +147,7 @@ async function run() {
         children[0].emit("exit", 0, "SIGTERM");
         assert.strictEqual((await firstStop).status, "STOPPED");
         assert.strictEqual(manager.getStatus(repository.id).state, "STOPPED");
+        assert.strictEqual(fs.existsSync(isolatedRuntime), false, "private repository runtime must be cleaned after STOP");
 
         manager.start(repository, profile);
         const forcedStop = manager.stop(repository.id);
@@ -149,6 +171,7 @@ async function run() {
         fs.symlinkSync(outsideLog, path.join(unsafeRepositoryDirectory, "run.log"));
         const unsafeManager = new RepositoryProcessManager({
             stateRoot: unsafeStateRoot,
+            isolationService: directIsolation(path.join(temporaryRoot, "unsafe-runtime")),
             resolveExecutable: () => process.execPath,
             spawn: () => { throw new Error("must not spawn"); }
         });
@@ -177,6 +200,7 @@ async function run() {
         });
         const realManager = new RepositoryProcessManager({
             stateRoot: path.join(temporaryRoot, "real-state"),
+            isolationService: directIsolation(path.join(temporaryRoot, "real-runtime")),
             resolveExecutable: () => process.execPath,
             gracePeriodMs: 100,
             killWaitMs: 100
@@ -208,6 +232,7 @@ async function run() {
         });
         treeManager = new RepositoryProcessManager({
             stateRoot: path.join(temporaryRoot, "tree-state"),
+            isolationService: directIsolation(path.join(temporaryRoot, "tree-runtime")),
             resolveExecutable: () => process.execPath,
             gracePeriodMs: 500,
             killWaitMs: 500

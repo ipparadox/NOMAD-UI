@@ -2,6 +2,11 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const {spawn} = require("child_process");
+const {
+    RepositoryIsolationError,
+    RepositoryIsolationService,
+    buildRepositoryRunEnvironment
+} = require("./repositoryIsolationService.js");
 
 const REPOSITORY_ID_PATTERN = /^repo_[a-f0-9]{32}$/;
 const PROFILE_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
@@ -10,12 +15,6 @@ const BLOCKED_EXECUTABLES = new Set([
     "sh", "bash", "dash", "zsh", "ksh", "csh", "tcsh", "fish",
     "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh",
     "sudo", "su", "pkexec", "env"
-]);
-const INHERITED_ENVIRONMENT_KEYS = new Set([
-    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE",
-    "TERM", "COLORTERM", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR",
-    "XAUTHORITY", "TMPDIR", "TMP", "TEMP", "SYSTEMROOT", "SystemRoot",
-    "WINDIR", "PATHEXT"
 ]);
 
 class RepositoryProcessError extends Error {
@@ -28,16 +27,6 @@ class RepositoryProcessError extends Error {
 
 function defaultRepositoryStateRoot(home = os.homedir()) {
     return path.join(home, ".local", "state", "nomad", "repositories");
-}
-
-function buildRepositoryRunEnvironment(source = process.env) {
-    const environment = {};
-    Object.keys(source || {}).forEach(key => {
-        if (!INHERITED_ENVIRONMENT_KEYS.has(key) && !/^LC_[A-Z0-9_]+$/.test(key)) return;
-        if (typeof source[key] !== "string" || source[key].includes("\0")) return;
-        environment[key] = source[key];
-    });
-    return environment;
 }
 
 function resolveTrustedExecutable(executable, opts = {}) {
@@ -112,6 +101,15 @@ class RepositoryProcessManager {
         this.platform = opts.platform || process.platform;
         this.environment = opts.env || process.env;
         this.stateRoot = opts.stateRoot || defaultRepositoryStateRoot(opts.home);
+        this.isolationService = opts.isolationService || new RepositoryIsolationService({
+            fs: this.fs,
+            path: this.path,
+            platform: this.platform,
+            env: this.environment,
+            home: opts.home
+        });
+        this.getSecurityProfile = typeof opts.getSecurityProfile === "function"
+            ? opts.getSecurityProfile : (() => "NORMAL");
         this.resolveExecutable = opts.resolveExecutable || (executable => resolveTrustedExecutable(executable, {
             fs: this.fs,
             path: this.path,
@@ -149,10 +147,38 @@ class RepositoryProcessManager {
             throw new RepositoryProcessError("RUN EXECUTABLE REFUSED");
         }
 
-        const log = this._openLog(repository.id);
+        let securityProfile;
+        let isolation;
+        try {
+            const selectedProfile = this.getSecurityProfile();
+            securityProfile = typeof selectedProfile === "string"
+                ? selectedProfile : (selectedProfile && selectedProfile.profile);
+            isolation = this.isolationService.prepareExecution({
+                repository,
+                profile,
+                executable: canonicalExecutable,
+                args: profile.args.slice(),
+                securityProfile
+            });
+        } catch (error) {
+            if (error instanceof RepositoryIsolationError) throw new RepositoryProcessError(error.status);
+            throw new RepositoryProcessError("SECURITY PROFILE UNAVAILABLE\nEXECUTION BLOCKED");
+        }
+        if (!isolation || !isolation.allowed) {
+            throw new RepositoryProcessError(isolation && isolation.status
+                ? isolation.status : "EXECUTION BLOCKED\nISOLATION REQUIREMENT NOT MET");
+        }
+
+        let log;
+        try {
+            log = this._openLog(repository.id);
+        } catch (error) {
+            this.isolationService.cleanup(isolation);
+            throw error;
+        }
         const options = {
-            cwd: repository.canonicalPath,
-            env: buildRepositoryRunEnvironment(this.environment),
+            cwd: isolation.cwd,
+            env: isolation.env,
             shell: false,
             detached: this.platform !== "win32",
             windowsHide: true,
@@ -162,9 +188,10 @@ class RepositoryProcessManager {
         let child;
         try {
             this._validateRepository(repository);
-            child = this.spawn(canonicalExecutable, profile.args.slice(), options);
+            child = this.spawn(isolation.executable, isolation.args.slice(), options);
         } catch (error) {
             this._closeDescriptor(log.descriptor);
+            this.isolationService.cleanup(isolation);
             throw error instanceof RepositoryProcessError ? error : new RepositoryProcessError("REPOSITORY RUN FAILED");
         }
         this._closeDescriptor(log.descriptor);
@@ -173,6 +200,7 @@ class RepositoryProcessManager {
             if (child && typeof child.once === "function") {
                 child.once("error", () => this.log("warn", "REPOSITORY RUN PROCESS START FAILED"));
             }
+            this.isolationService.cleanup(isolation);
             throw new RepositoryProcessError("REPOSITORY RUN FAILED");
         }
 
@@ -187,6 +215,11 @@ class RepositoryProcessManager {
             executable: profile.executable,
             resolvedExecutable: canonicalExecutable,
             args: profile.args.slice(),
+            securityProfile: isolation.securityProfile,
+            isolationLevel: isolation.level,
+            isolationBackend: isolation.backend,
+            isolationReason: isolation.reason,
+            isolation,
             pid: child.pid,
             processGroupId: options.detached ? child.pid : null,
             logPath: log.path,
@@ -311,7 +344,10 @@ class RepositoryProcessManager {
             startedAt: record.startedAt,
             exitedAt: record.exitedAt,
             exitCode: record.exitCode,
-            signal: record.signal
+            signal: record.signal,
+            securityProfile: record.securityProfile,
+            isolationLevel: record.isolationLevel,
+            isolationBackend: record.isolationBackend
         };
     }
 
@@ -345,6 +381,26 @@ class RepositoryProcessManager {
             if (ACTIVE_STATES.has(record.state)) return true;
         }
         return false;
+    }
+
+    getExecutionSecurityStatus() {
+        try {
+            const selectedProfile = this.getSecurityProfile();
+            const profile = typeof selectedProfile === "string"
+                ? selectedProfile : (selectedProfile && selectedProfile.profile);
+            return this.isolationService.evaluatePolicy(profile);
+        } catch (error) {
+            return {
+                allowed: false,
+                securityProfile: "UNKNOWN",
+                requiredLevel: "UNKNOWN",
+                availableLevel: "UNAVAILABLE",
+                level: "UNAVAILABLE",
+                backend: "UNAVAILABLE",
+                reason: "SECURITY PROFILE UNAVAILABLE",
+                status: "EXECUTION BLOCKED\nSECURITY PROFILE UNAVAILABLE"
+            };
+        }
     }
 
     _validateRepository(repository) {
@@ -465,6 +521,14 @@ class RepositoryProcessManager {
             error.code = "ESRCH";
             throw error;
         }
+        if (record.isolation && record.isolation.controller) {
+            if (!this.isolationService.signal(record.isolation.controller, signal)) {
+                const error = new Error("isolation controller refused signal");
+                error.code = "EIO";
+                throw error;
+            }
+            return;
+        }
         const target = record.processGroupId ? -record.processGroupId : record.pid;
         this.kill(target, signal);
     }
@@ -511,6 +575,7 @@ class RepositoryProcessManager {
         record.termTimer = null;
         record.killTimer = null;
         record.groupCheckTimer = null;
+        this.isolationService.cleanup(record.isolation);
         this._emitState(record);
         this._resolveStop(record, {ok: true, status: state, process: this.getStatus(record.repositoryId)});
     }

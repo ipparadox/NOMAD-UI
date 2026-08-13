@@ -529,17 +529,24 @@ class RepositoryActionService {
         const runInspection = internal
             ? this.runProfileService.inspect(internal)
             : {candidates: [], trustStoreStatus: null};
+        const executionSecurity = this._executionSecurity(processStatus);
+        executionSecurity.authorization = runInspection.candidates.length
+            && runInspection.candidates.every(candidate => candidate.authorizationState === "APPROVED")
+            ? "TRUSTED" : "REQUIRED";
         let pullCapability = {ok: false, state: "UNAVAILABLE"};
         if (internal && this.gitService.isUpdating(repository.id)) {
             pullCapability = {ok: false, state: "UPDATING"};
         } else if (internal && !processActive) pullCapability = await this.gitService.inspectUpdate(internal);
         publicRepository.process = processStatus;
+        publicRepository.executionSecurity = executionSecurity;
         publicRepository.actions = Array.from(this.actions.values()).map(action => {
             let enabled;
             let state = "";
             if (action.definition.id === "run") {
-                enabled = !processActive && runInspection.candidates.length > 0;
+                enabled = !processActive && runInspection.candidates.length > 0 && executionSecurity.allowed;
                 if (processActive) state = processStatus.state;
+                else if (!executionSecurity.allowed) state = executionSecurity.securityProfile === "LOCKDOWN"
+                    ? "LOCKDOWN" : "ISOLATION BLOCKED";
                 else if (!runInspection.candidates.length) state = "NO PROFILE";
                 else if (runInspection.candidates.some(candidate => candidate.authorizationState !== "APPROVED")) {
                     state = "AUTH REQUIRED";
@@ -631,6 +638,11 @@ class RepositoryActionService {
             };
         }
 
+        const executionSecurity = this._executionSecurity();
+        if (!executionSecurity.allowed) {
+            return {ok: false, status: executionSecurity.status};
+        }
+
         const inspection = this.runProfileService.inspect(repository);
         if (!inspection.candidates.length) return {ok: false, status: "NO SAFE RUN PROFILE DETECTED"};
         let candidate = null;
@@ -676,6 +688,8 @@ class RepositoryActionService {
             || pending.profileFingerprint !== candidate.profileFingerprint) {
             return {ok: false, status: "RUN PROFILE CHANGED\nAUTHORIZATION REQUIRED"};
         }
+        const executionSecurity = this._executionSecurity();
+        if (!executionSecurity.allowed) return {ok: false, status: executionSecurity.status};
         if (request.authorization === "trust-profile") this.runProfileService.approve(repository, candidate);
         else if (request.authorization !== "run-once") return {ok: false, status: "INVALID REQUEST"};
         return this._launch(repository, candidate);
@@ -755,6 +769,7 @@ class RepositoryActionService {
             this.pendingAuthorizations.delete(this.pendingAuthorizations.keys().next().value);
         }
         const trustEnabled = !inspection.trustStoreStatus && Boolean(repository.repositoryIdentity);
+        const executionSecurity = this._executionSecurity();
         return {
             kind: "authorization",
             title: "REPOSITORY EXECUTION",
@@ -764,7 +779,9 @@ class RepositoryActionService {
             fields: [
                 {label: "PROFILE", value: candidate.displayName},
                 {label: "EXECUTABLE", value: candidate.executable},
-                {label: "ARGUMENTS", value: candidate.args.join(" ") || "NONE"}
+                {label: "ARGUMENTS", value: candidate.args.join(" ") || "NONE"},
+                {label: "SECURITY", value: executionSecurity.securityProfile},
+                {label: "ISOLATION", value: executionSecurity.level}
             ],
             warning: candidate.authorizationState === "CHANGED"
                 ? "RUN PROFILE CHANGED\nAUTHORIZATION REQUIRED\nREPOSITORY CODE WILL EXECUTE"
@@ -787,6 +804,47 @@ class RepositoryActionService {
         this.pendingAuthorizations.forEach((authorization, id) => {
             if (authorization.expiresAt < now) this.pendingAuthorizations.delete(id);
         });
+    }
+
+    _executionSecurity(processStatus = null) {
+        let status;
+        if (typeof this.processManager.getExecutionSecurityStatus === "function") {
+            status = this.processManager.getExecutionSecurityStatus();
+        }
+        if (!status || typeof status !== "object") {
+            status = {
+                allowed: true,
+                securityProfile: "NORMAL",
+                requiredLevel: "NONE",
+                availableLevel: "NONE",
+                level: "NONE",
+                backend: "DIRECT",
+                reason: "SUPERVISED DIRECT EXECUTION; NO FILESYSTEM SANDBOX",
+                status: "EXECUTION PERMITTED"
+            };
+        }
+        const active = processStatus && ACTIVE_STATES.has(processStatus.state);
+        return {
+            allowed: status.allowed === true,
+            securityProfile: active && ["NORMAL", "PUBLIC", "LOCKDOWN"].includes(processStatus.securityProfile)
+                ? processStatus.securityProfile : (["NORMAL", "PUBLIC", "LOCKDOWN"].includes(status.securityProfile)
+                    ? status.securityProfile : "UNKNOWN"),
+            level: active && ["STRONG", "PARTIAL", "NONE"].includes(processStatus.isolationLevel)
+                ? processStatus.isolationLevel : (["STRONG", "PARTIAL", "NONE", "UNAVAILABLE"].includes(status.level)
+                    ? status.level : "UNAVAILABLE"),
+            backend: active && typeof processStatus.isolationBackend === "string"
+                ? sanitizeText(processStatus.isolationBackend, "UNAVAILABLE", 32)
+                : sanitizeText(status.backend, "UNAVAILABLE", 32),
+            requiredLevel: sanitizeText(status.requiredLevel, "UNKNOWN", 16),
+            availableLevel: sanitizeText(status.availableLevel, "UNAVAILABLE", 16),
+            reason: sanitizeText(status.reason, "ISOLATION STATUS UNAVAILABLE", 160),
+            status: status.allowed === true ? "EXECUTION PERMITTED"
+                : (status.securityProfile === "LOCKDOWN"
+                    ? "EXECUTION BLOCKED\nLOCKDOWN POLICY DISABLES REPOSITORY EXECUTION"
+                    : (status.securityProfile === "UNKNOWN"
+                        ? "EXECUTION BLOCKED\nSECURITY PROFILE UNAVAILABLE"
+                        : "EXECUTION BLOCKED\nISOLATION REQUIREMENT NOT MET"))
+        };
     }
 
     async _github(context) {

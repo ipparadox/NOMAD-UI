@@ -55,6 +55,12 @@ assert.deepStrictEqual(fs.readFileSync(ownedMarker, "utf8").trim().split("\n"), 
     cliSource
 ]);
 assert(installed.stdout.includes("Installed the NOMAD CLI launcher"));
+assert.strictEqual(
+    fs.statSync(path.join(ownedEnv.XDG_CONFIG_HOME, "nomad", "session.env")).mode & 0o777,
+    0o600,
+    "new session.env files must be private"
+);
+assert(fs.readFileSync(ownedEnv.NOMAD_SYSTEM_LAUNCHER, "utf8").includes("export NOMAD_PRODUCTION=1"));
 
 fs.accessSync(cliSource, fs.constants.X_OK);
 
@@ -89,6 +95,18 @@ const changedUninstall = run(uninstallScript, changedEnv);
 assert.strictEqual(changedUninstall.status, 0, changedUninstall.stderr);
 assert.strictEqual(fs.readFileSync(changedLauncher, "utf8"), "replacement launcher\n");
 assert(changedUninstall.stdout.includes("CLI launcher changed; leaving it untouched"));
+
+const unsafeEnvRoot = path.join(temporaryRoot, "unsafe-session-env");
+const unsafeEnv = environment(unsafeEnvRoot);
+const unsafeConfigDirectory = path.join(unsafeEnv.XDG_CONFIG_HOME, "nomad");
+const unsafeVictim = path.join(unsafeEnvRoot, "victim.env");
+fs.mkdirSync(unsafeConfigDirectory, {recursive: true});
+fs.writeFileSync(unsafeVictim, "DO NOT CHANGE\n", {mode: 0o600});
+fs.symlinkSync(unsafeVictim, path.join(unsafeConfigDirectory, "session.env"));
+const unsafeInstall = run(installScript, unsafeEnv);
+assert.notStrictEqual(unsafeInstall.status, 0);
+assert(unsafeInstall.stderr.includes("unsafe NOMAD session environment file"));
+assert.strictEqual(fs.readFileSync(unsafeVictim, "utf8"), "DO NOT CHANGE\n");
 
 fs.rmSync(temporaryRoot, {recursive: true, force: true});
 console.log("NOMAD session installer CLI ownership, collision handling, and safe uninstall passed");

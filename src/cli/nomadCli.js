@@ -3,6 +3,7 @@ const {ApplicationService} = require("./applicationService.js");
 const {CliError} = require("./errors.js");
 const {InstallService} = require("./installService.js");
 const {RepositoryCliService} = require("./repositoryCliService.js");
+const {SecurityCliService} = require("./securityCliService.js");
 const {
     MAX_LEARNING_TIMEOUT_MS,
     MIN_LEARNING_TIMEOUT_MS,
@@ -14,6 +15,7 @@ const GENERAL_HELP = `NOMAD CLI
 USAGE
   nomad app <command> [application]
   nomad repo <command> [repository]
+  nomad security <command>
   nomad install <application> [--apply]
 
 COMMANDS
@@ -28,9 +30,12 @@ COMMANDS
   repo clone <github-url>  Clone and register a safe GitHub repository
   repo info <repository>   Show local repository and Git state
   repo pull <repository>   Fetch and fast-forward a clean repository
+  security status          Show factual observed security status
+  security audit           Show actionable security findings
+  security profile         Show or change the selected policy profile
   install <application>    Plan a catalog-backed package installation
 
-Run 'nomad app --help' or 'nomad repo --help' for command help.`;
+Run 'nomad app --help', 'nomad repo --help', or 'nomad security --help' for command help.`;
 
 const APP_HELP = `NOMAD APPLICATION MANAGEMENT
 
@@ -54,6 +59,18 @@ USAGE
   nomad repo pull <repository>
 
 Only validated GitHub repository URLs and safe fast-forward updates are supported.`;
+
+const SECURITY_HELP = `NOMAD SECURITY
+
+USAGE
+  nomad security status [--verbose]
+  nomad security audit
+  nomad security profile
+  nomad security profile list
+  nomad security profile set <normal|public|lockdown>
+
+Profile changes apply NOMAD policy and safe user-level gates only.
+No firewall, mount, boot, encryption, or privileged system setting is changed.`;
 
 function table(headers, rows) {
     const widths = headers.map((header, column) => rows.reduce((width, row) => {
@@ -133,6 +150,7 @@ async function runCli(argv, opts = {}) {
     let applicationService;
     let installService;
     let repositoryCliService;
+    let securityCliService;
     let windowClassLearningService;
 
     const applications = () => {
@@ -156,6 +174,10 @@ async function runCli(argv, opts = {}) {
     const repositories = () => {
         if (!repositoryCliService) repositoryCliService = opts.repositoryCliService || new RepositoryCliService(opts);
         return repositoryCliService;
+    };
+    const security = () => {
+        if (!securityCliService) securityCliService = opts.securityCliService || new SecurityCliService(opts);
+        return securityCliService;
     };
 
     try {
@@ -335,6 +357,123 @@ async function runCli(argv, opts = {}) {
             throw new CliError(`UNKNOWN REPO COMMAND: ${command}\nRun 'nomad repo --help'.`, 2);
         }
 
+        if (argv[0] === "security") {
+            if (argv.length === 1 || (argv.length === 2 && ["--help", "-h", "help"].includes(argv[1]))) {
+                write(SECURITY_HELP);
+                return 0;
+            }
+            const command = argv[1];
+
+            if (command === "status") {
+                const verbose = argv.length === 3 && argv[2] === "--verbose";
+                if (argv.length > 2 && !verbose) {
+                    throw new CliError("USAGE: nomad security status [--verbose]", 2);
+                }
+                const result = security().status(verbose);
+                const checks = new Map(result.checks.map(check => [check.id, check]));
+                const rows = [["PROFILE", result.profile.id, result.profile.compliance]];
+                [
+                    ["repository_execution", "REPOSITORY EXEC"],
+                    ["repository_isolation", "REPOSITORY ISOLATION"],
+                    ["firewall", "FIREWALL"],
+                    ["host_storage", "HOST STORAGE"],
+                    ["automount", "AUTOMOUNT"],
+                    ["disk_encryption", "DISK ENCRYPTION"],
+                    ["swap", "SWAP"],
+                    ["secure_boot", "SECURE BOOT"],
+                    ["session_type", "SESSION"],
+                    ["debug_devtools", "DEBUG / DEVTOOLS"]
+                ].forEach(([id, label]) => {
+                    const check = checks.get(id);
+                    if (check) rows.push([label, check.actual, check.state]);
+                });
+                write("NOMAD SECURITY STATUS");
+                write("");
+                write(table(["CHECK", "ACTUAL", "STATE"], rows));
+                if (result.profile.systemEnforcementPending) {
+                    write("");
+                    write("SYSTEM-LEVEL ENFORCEMENT PENDING");
+                }
+                if (verbose) {
+                    write("");
+                    write("OBSERVED CHECKS");
+                    write("");
+                    write(table(["CHECK", "STATE", "DETAIL"], result.checks.map(check => [
+                        check.label, check.state, check.detail
+                    ])));
+                    write("");
+                    write("PROFILE POLICY");
+                    write("");
+                    write(table(["POLICY", "DESIRED", "ACTUAL", "COMPLIANT", "ENFORCEABLE"], result.policy.map(item => [
+                        item.label,
+                        item.desired,
+                        item.actual,
+                        item.compliant === null ? "UNKNOWN" : (item.compliant ? "YES" : "NO"),
+                        item.enforceable
+                    ])));
+                    write("");
+                    write(`ISOLATION BACKEND: ${result.capabilities.preferredBackend}`);
+                    write(`MAXIMUM ISOLATION: ${result.capabilities.maximumLevel}`);
+                    if (result.hostStorage) {
+                        write(`ROOT FILESYSTEM BACKING: ${result.hostStorage.rootBacking}`);
+                        write(`REPOSITORY FILESYSTEM BACKING: ${result.hostStorage.repositoryBacking}`);
+                        write(`INTERNAL MOUNTS: ${result.hostStorage.internalMountCount}`);
+                        write(`REMOVABLE MOUNTS: ${result.hostStorage.removableMountCount}`);
+                    }
+                }
+                return 0;
+            }
+
+            if (command === "audit") {
+                if (argv.length !== 2) throw new CliError("USAGE: nomad security audit", 2);
+                const result = security().audit();
+                write("NOMAD SECURITY AUDIT");
+                write("");
+                if (!result.findings.length) write("NO ACTIONABLE FINDINGS");
+                else write(table(["SEVERITY", "AREA", "FINDING", "REMEDIATION"], result.findings.map(finding => [
+                    finding.severity, finding.label, finding.detail, finding.remediation
+                ])));
+                return 0;
+            }
+
+            if (command === "profile") {
+                if (argv.length === 2) {
+                    const result = security().profile();
+                    write("NOMAD SECURITY PROFILE");
+                    write("");
+                    write(`PROFILE: ${result.profile}`);
+                    write(`SOURCE: ${result.source}`);
+                    write(`COMPLIANCE: ${result.compliance}`);
+                    if (result.systemEnforcementPending) write("SYSTEM-LEVEL ENFORCEMENT PENDING");
+                    return 0;
+                }
+                if (argv.length === 3 && argv[2] === "list") {
+                    const rows = security().listProfiles().map(profile => [
+                        profile.id,
+                        profile.repositoryExecution,
+                        profile.minimumRepositoryIsolation,
+                        profile.hostStorageAccess,
+                        profile.networkPolicy
+                    ]);
+                    write("NOMAD SECURITY PROFILES");
+                    write("");
+                    write(table(["PROFILE", "REPOSITORY EXEC", "MIN ISOLATION", "HOST STORAGE", "NETWORK"], rows));
+                    return 0;
+                }
+                if (argv.length === 4 && argv[2] === "set") {
+                    const result = security().setProfile(argv[3]);
+                    write("PROFILE CHANGED");
+                    write(`PROFILE: ${result.profile}`);
+                    write(`COMPLIANCE: ${result.compliance}`);
+                    if (result.systemEnforcementPending) write("SYSTEM-LEVEL ENFORCEMENT PENDING");
+                    return 0;
+                }
+                throw new CliError("USAGE: nomad security profile [list|set <normal|public|lockdown>]", 2);
+            }
+
+            throw new CliError(`UNKNOWN SECURITY COMMAND: ${command}\nRun 'nomad security --help'.`, 2);
+        }
+
         if (argv[0] === "install") {
             const apply = argv.includes("--apply");
             const operands = argv.slice(1).filter(argument => argument !== "--apply");
@@ -380,4 +519,4 @@ async function runCli(argv, opts = {}) {
     }
 }
 
-module.exports = {APP_HELP, GENERAL_HELP, REPO_HELP, runCli};
+module.exports = {APP_HELP, GENERAL_HELP, REPO_HELP, SECURITY_HELP, runCli};

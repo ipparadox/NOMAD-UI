@@ -15,6 +15,13 @@ function repositoryWithProcess(processState = null) {
         remoteAvailable: true,
         remoteProvider: "GITHUB",
         repositoryAvailable: true,
+        executionSecurity: {
+            allowed: true,
+            authorization: "TRUSTED",
+            securityProfile: "NORMAL",
+            level: "NONE",
+            backend: "DIRECT"
+        },
         process: processState ? {
             profileId: "npm-dev",
             displayName: "NPM DEV",
@@ -22,7 +29,10 @@ function repositoryWithProcess(processState = null) {
             startedAt: "2026-08-12T12:00:00.000Z",
             exitedAt: processState === "STOPPED" ? "2026-08-12T12:01:00.000Z" : null,
             exitCode: processState === "STOPPED" ? 0 : null,
-            signal: null
+            signal: null,
+            securityProfile: "NORMAL",
+            isolationLevel: "NONE",
+            isolationBackend: "DIRECT"
         } : null,
         actions: [
             {id: "code", label: "CODE", enabled: true, state: ""},
@@ -137,6 +147,9 @@ async function run() {
     });
     const running = launcher._selectedRepository();
     assert.strictEqual(running.process.state, "RUNNING");
+    assert.strictEqual(running.executionSecurity.authorization, "TRUSTED");
+    assert.strictEqual(running.executionSecurity.securityProfile, "NORMAL");
+    assert.strictEqual(running.executionSecurity.level, "NONE");
     assert.strictEqual(running.actions.find(action => action.id === "run").state, "RUNNING");
     assert.strictEqual(running.actions.find(action => action.id === "stop").enabled, true);
 
@@ -150,6 +163,21 @@ async function run() {
     launcher._handleKeydown(keyEvent("Escape"));
     assert.strictEqual(launcher.isOpen, false);
     assert.deepStrictEqual(resumes, ["browser"]);
+
+    const blocked = repositoryWithProcess();
+    blocked.executionSecurity = {
+        allowed: false,
+        authorization: "TRUSTED",
+        securityProfile: "PUBLIC",
+        level: "NONE",
+        backend: "DIRECT"
+    };
+    blocked.actions.find(action => action.id === "run").enabled = false;
+    blocked.actions.find(action => action.id === "run").state = "ISOLATION BLOCKED";
+    launcher.setRepositories([blocked]);
+    launcher.selectRepository(repositoryId);
+    assert.strictEqual(await launcher.activate("run"), false);
+    assert.strictEqual(launcher.errorMessage, "EXECUTION BLOCKED\nISOLATION REQUIREMENT NOT MET");
 
     launcher.destroy();
     console.log("Repository RUN profile selection, authorization, keyboard, status, and STOP HUD flow passed");

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -u
+umask 077
 
 readonly NOMAD_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/nomad"
 readonly NOMAD_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nomad"
@@ -22,12 +23,20 @@ launch_ui() {
     local nomad_root="${NOMAD_ROOT:-$HOME/Projects/NOMAD-UI}"
     local nvm_dir="${NVM_DIR:-$HOME/.nvm}"
 
-    if [[ -r "$NOMAD_CONFIG_DIR/session.env" ]]; then
-        # This file is user-owned configuration and must contain shell syntax.
-        # shellcheck source=/dev/null
-        source "$NOMAD_CONFIG_DIR/session.env"
-        nomad_root="${NOMAD_ROOT:-$nomad_root}"
-        nvm_dir="${NVM_DIR:-$nvm_dir}"
+    if [[ -e "$NOMAD_CONFIG_DIR/session.env" || -L "$NOMAD_CONFIG_DIR/session.env" ]]; then
+        local env_permissions=""
+        env_permissions="$(stat -c '%A' -- "$NOMAD_CONFIG_DIR/session.env" 2>/dev/null || true)"
+        if [[ -L "$NOMAD_CONFIG_DIR/session.env" || ! -f "$NOMAD_CONFIG_DIR/session.env" \
+            || ! -O "$NOMAD_CONFIG_DIR/session.env" || ! -r "$NOMAD_CONFIG_DIR/session.env" \
+            || "${env_permissions:5:1}" == "w" || "${env_permissions:8:1}" == "w" ]]; then
+            log "Refusing unsafe session.env; using default session paths"
+        else
+            # This verified user-owned regular file contains optional shell syntax.
+            # shellcheck source=/dev/null
+            source "$NOMAD_CONFIG_DIR/session.env"
+            nomad_root="${NOMAD_ROOT:-$nomad_root}"
+            nvm_dir="${NVM_DIR:-$nvm_dir}"
+        fi
     fi
 
     exec >>"$NOMAD_UI_LOG" 2>&1
@@ -45,6 +54,8 @@ launch_ui() {
     fi
 
     export NVM_DIR="$nvm_dir"
+    export NOMAD_PRODUCTION=1
+    unset NODE_OPTIONS NODE_PATH ELECTRON_RUN_AS_NODE BASH_ENV ENV
     # shellcheck source=/dev/null
     source "$NVM_DIR/nvm.sh"
     if ! nvm use 14; then
@@ -99,4 +110,3 @@ case "${1:-}" in
         exit 2
         ;;
 esac
-

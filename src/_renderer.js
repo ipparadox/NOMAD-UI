@@ -723,6 +723,18 @@ async function initUI() {
     });
     await window.repositoryLauncher.render();
 
+    window.securityHud = new SecurityHud({
+        loadStatus: () => ipc.invoke("security.status", {verbose: false}),
+        onOpen: () => window.keyboard.detach(),
+        onClose: () => {
+            if (!document.getElementById("settingsEditor")) {
+                window.keyboard.attach();
+                if (window.term && window.term[window.currentTerm]) window.term[window.currentTerm].term.focus();
+            }
+        }
+    });
+    window.openSecurityStatus = () => window.securityHud.open();
+
     await _delay(200);
 
     document.getElementById("repository").setAttribute("style", "opacity: 1;");
@@ -1044,6 +1056,7 @@ window.openSettings = async () => {
                 <h6 id="settingsEditorStatus">Loaded values from memory</h6>
                 <br>`,
         buttons: [
+            {label: "Security Status", action: "window.openSecurityStatus()"},
             {label: "Open in External Editor", action:`electron.shell.openPath('${settingsFile}');electronWin.minimize();`},
             {label: "Save to Disk", action: "window.writeSettingsFile()"},
             {label: "Reload UI", action: "window.location.reload(true);"},

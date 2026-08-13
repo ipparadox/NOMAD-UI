@@ -17,6 +17,62 @@ div.modal_popup {
     --aug-inset-bg: var(--color_light_black);
 }
 
+section#security_hud {
+    width: min(76vw, 1180px);
+    color: rgb(var(--color_r), var(--color_g), var(--color_b));
+    font-family: var(--font_mono);
+    font-size: 1.05vh;
+    letter-spacing: .05em;
+}
+
+section#security_hud > header {
+    display: flex;
+    justify-content: space-between;
+    padding: .55vh .35vw;
+    border-top: .092vh solid rgba(var(--color_r), var(--color_g), var(--color_b), .55);
+    border-bottom: .092vh solid rgba(var(--color_r), var(--color_g), var(--color_b), .55);
+}
+
+section#security_hud > p {
+    margin: .65vh 0;
+    padding: .45vh .35vw;
+    border-left: .092vh solid var(--color_yellow);
+    color: var(--color_yellow);
+}
+
+section#security_hud > div {
+    overflow: auto;
+    max-height: 58vh;
+}
+
+section#security_hud table {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
+}
+
+section#security_hud th,
+section#security_hud td {
+    padding: .45vh .4vw;
+    border-bottom: .092vh solid rgba(var(--color_r), var(--color_g), var(--color_b), .2);
+    vertical-align: top;
+}
+
+section#security_hud th {
+    color: rgba(var(--color_r), var(--color_g), var(--color_b), .55);
+    font-weight: normal;
+}
+
+section#security_hud td[data-security-state="INSECURE"] {
+    color: var(--color_red);
+}
+
+section#security_hud td[data-security-state="PARTIAL"],
+section#security_hud td[data-security-state="UNKNOWN"],
+section#security_hud td[data-security-state="UNAVAILABLE"] {
+    color: var(--color_yellow);
+}
+
 div.modal_popup.error {
     --aug-bl-height: 3vh;
     --aug-bl-width: 30%;

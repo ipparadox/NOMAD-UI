@@ -204,7 +204,12 @@ class RepositoryLauncher {
         const repository = this._selectedRepository();
         const action = repository && repository.actions.find(item => item.id === actionId);
         if (!repository || !action || !action.enabled) {
-            this._showError("ACTION UNAVAILABLE");
+            if (repository && action && action.id === "run" && repository.executionSecurity
+                && !repository.executionSecurity.allowed) {
+                this._showError(repository.executionSecurity.securityProfile === "LOCKDOWN"
+                    ? "EXECUTION BLOCKED\nLOCKDOWN POLICY DISABLES REPOSITORY EXECUTION"
+                    : "EXECUTION BLOCKED\nISOLATION REQUIREMENT NOT MET");
+            } else this._showError("ACTION UNAVAILABLE");
             return false;
         }
 
@@ -483,9 +488,17 @@ class RepositoryLauncher {
                 startedAt: typeof repository.process.startedAt === "string" ? repository.process.startedAt.slice(0, 64) : null,
                 exitedAt: typeof repository.process.exitedAt === "string" ? repository.process.exitedAt.slice(0, 64) : null,
                 exitCode: Number.isInteger(repository.process.exitCode) ? repository.process.exitCode : null,
-                signal: typeof repository.process.signal === "string" ? repository.process.signal.slice(0, 32) : null
+                signal: typeof repository.process.signal === "string" ? repository.process.signal.slice(0, 32) : null,
+                securityProfile: ["NORMAL", "PUBLIC", "LOCKDOWN"].includes(repository.process.securityProfile)
+                    ? repository.process.securityProfile : "UNKNOWN",
+                isolationLevel: ["STRONG", "PARTIAL", "NONE", "UNAVAILABLE"].includes(repository.process.isolationLevel)
+                    ? repository.process.isolationLevel : "UNAVAILABLE",
+                isolationBackend: typeof repository.process.isolationBackend === "string"
+                    ? repository.process.isolationBackend.slice(0, 32) : "UNAVAILABLE"
             };
         }
+        const execution = repository.executionSecurity && typeof repository.executionSecurity === "object"
+            && !Array.isArray(repository.executionSecurity) ? repository.executionSecurity : {};
         return {
             id: repository.id,
             displayName: typeof repository.displayName === "string" ? repository.displayName.slice(0, 255) : "REPOSITORY",
@@ -501,6 +514,16 @@ class RepositoryLauncher {
             ahead: Number.isSafeInteger(repository.ahead) && repository.ahead >= 0 ? repository.ahead : null,
             behind: Number.isSafeInteger(repository.behind) && repository.behind >= 0 ? repository.behind : null,
             repositoryAvailable: repository.repositoryAvailable !== false,
+            executionSecurity: {
+                allowed: execution.allowed === true,
+                authorization: ["TRUSTED", "REQUIRED"].includes(execution.authorization)
+                    ? execution.authorization : "REQUIRED",
+                securityProfile: ["NORMAL", "PUBLIC", "LOCKDOWN"].includes(execution.securityProfile)
+                    ? execution.securityProfile : "UNKNOWN",
+                level: ["STRONG", "PARTIAL", "NONE", "UNAVAILABLE"].includes(execution.level)
+                    ? execution.level : "UNAVAILABLE",
+                backend: typeof execution.backend === "string" ? execution.backend.slice(0, 32) : "UNAVAILABLE"
+            },
             process: processState,
             actions
         };
@@ -640,8 +663,15 @@ class RepositoryLauncher {
     _renderSummary(repository) {
         this.summaryElement.replaceChildren();
         const fields = [["BRANCH", repository.branch], ["STATUS", repository.status]];
+        if (repository.executionSecurity) {
+            fields.push(
+                ["AUTH", repository.executionSecurity.authorization],
+                ["ISOLATION", repository.executionSecurity.level],
+                ["SECURITY", repository.executionSecurity.securityProfile]
+            );
+        }
         if (repository.process) {
-            fields.push(["PROCESS", repository.process.state], ["PROFILE", repository.process.displayName]);
+            fields.push(["PROCESS", repository.process.state], ["RUN PROFILE", repository.process.displayName]);
         }
         fields.forEach(field => this._appendSummaryLine(field[0], field[1]));
     }
@@ -691,7 +721,10 @@ class RepositoryLauncher {
             ["UPSTREAM", repository.upstream],
             ["AHEAD", repository.ahead === null ? "UNKNOWN" : String(repository.ahead)],
             ["BEHIND", repository.behind === null ? "UNKNOWN" : String(repository.behind)],
-            ["PROCESS", repository.process ? repository.process.state : "STOPPED"]
+            ["PROCESS", repository.process ? repository.process.state : "STOPPED"],
+            ["AUTHORIZATION", repository.executionSecurity.authorization],
+            ["ISOLATION", repository.executionSecurity.level],
+            ["PROFILE", repository.executionSecurity.securityProfile]
         ];
         fields.forEach(([label, value]) => {
             const term = this.document.createElement("dt");
