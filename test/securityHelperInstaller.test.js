@@ -7,6 +7,7 @@ const {spawnSync} = require("child_process");
 const root = path.resolve(__dirname, "..");
 const installer = path.join(root, "scripts", "install-nomad-security-helper.sh");
 const source = fs.readFileSync(installer, "utf8");
+const helperSource = fs.readFileSync(path.join(root, "src", "security-helper", "nomad-security-helper.js"), "utf8");
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "nomad-helper-installer-"));
 
 function plan(environment, args = []) {
@@ -31,6 +32,9 @@ try {
     assert(initial.stdout.includes(path.join(temporaryRoot, "Repositories")));
     assert(initial.stdout.includes("PLAN ONLY"));
     assert(initial.stdout.includes("No firewall or mount change"));
+    assert(initial.stdout.includes("Runtime prerequisite: trusted root-owned /usr/bin/node"));
+    assert(initial.stdout.includes("Helper runtime state: AVAILABLE")
+        || initial.stdout.includes("Helper runtime state: UNAVAILABLE (fail closed"));
 
     const settingsDirectory = path.join(temporaryRoot, "config", "eDEX-UI");
     fs.mkdirSync(settingsDirectory, {recursive: true, mode: 0o700});
@@ -52,13 +56,19 @@ try {
     assert(invalid.stderr.includes("USAGE"));
 
     assert(source.includes('"$SUDO_EXECUTABLE" "$INSTALL_EXECUTABLE"'));
+    assert(source.includes('readonly NODE_EXECUTABLE="/usr/bin/node"'));
+    assert(source.includes('trusted_root_executable "$NODE_EXECUTABLE"'));
+    assert(source.includes("NVM and user-writable runtimes are never accepted"));
+    assert(!source.includes(".nvm/"));
+    assert(!source.includes("/usr/bin/env node"));
+    assert.strictEqual(helperSource.split("\n")[0], "#!/usr/bin/node");
     assert(source.includes('HELPER_SOURCE_FD_PATH="/proc/$$/fd/$helper_source_fd"'));
     assert(source.includes('"$helper_temp" "$HELPER_TARGET"'),
         "sudo must install an inode-pinned private snapshot rather than reopening the repository path");
     assert(!source.includes("sudo sh"));
     assert(!source.includes("eval "));
     assert(!source.includes("shell: true"));
-    console.log("Helper installation dry-run, configured repository protection, unsafe settings refusal, and fixed privileged install surface passed");
+    console.log("Helper dry-run, exact root-owned /usr/bin/node policy, NVM refusal, protected settings, and fixed install surface passed");
 } finally {
     fs.rmSync(temporaryRoot, {recursive: true, force: true});
 }

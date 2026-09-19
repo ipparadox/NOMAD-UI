@@ -104,3 +104,55 @@ section#boot_screen h1.glitch::after {
     from {transform: translateY(-100%) translateX(1%);}
     to {transform: translateY(-100%) translateX(3%);}
 }
+
+section#boot_screen.nomad_secure_boot_screen {
+    z-index: 1000;
+    box-sizing: border-box;
+    align-items: center;
+    justify-content: center;
+    padding: 8vh 10vw;
+    color: #00dffc;
+    background: #05090b;
+}
+
+#nomad_secure_bootstrap_status {
+    box-sizing: border-box;
+    width: min(52rem, 72vw);
+    padding: 2.2vh 2vw;
+    border-top: .12vh solid rgba(0, 223, 252, .8);
+    border-bottom: .12vh solid rgba(0, 223, 252, .55);
+    border-left: .28vh solid #00dffc;
+    clip-path: polygon(0 0, calc(100% - 1.8vh) 0, 100% 1.8vh, 100% 100%, 1.8vh 100%, 0 calc(100% - 1.8vh));
+    background: rgba(0, 0, 0, .94);
+    box-shadow: 0 0 4vh rgba(0, 223, 252, .08);
+    font-family: "Fira Mono", monospace;
+}
+
+#nomad_secure_bootstrap_status h1 {
+    margin: 0 0 2vh;
+    padding-bottom: 1vh;
+    border-bottom: .09vh solid rgba(0, 223, 252, .45);
+    font-family: "Fira Mono", monospace;
+    font-size: 2.2vh;
+    font-weight: normal;
+    letter-spacing: .16em;
+}
+
+#nomad_secure_bootstrap_status p {
+    display: grid;
+    grid-template-columns: 10rem 1fr;
+    margin: .65vh 0;
+    font-size: 1.3vh;
+    letter-spacing: .08em;
+}
+
+#nomad_secure_bootstrap_status p span:first-child {
+    color: rgba(0, 223, 252, .52);
+}
+
+#nomad_secure_bootstrap_status footer {
+    margin-top: 2.2vh;
+    color: rgba(0, 223, 252, .65);
+    font-size: 1.05vh;
+    letter-spacing: .18em;
+}

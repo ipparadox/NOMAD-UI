@@ -522,6 +522,7 @@ class SecurityService {
             enableRemoteModule: true,
             contextIsolation: false,
             preloadBridge: false,
+            runtimeVerified: false,
             experimentalFeatures: false
         }, opts.debugConfiguration || {});
         this.hasActiveRepositoryProcesses = typeof opts.hasActiveRepositoryProcesses === "function"
@@ -1191,9 +1192,17 @@ class SecurityService {
         if (this.debugConfiguration.nodeIntegration === false
             && this.debugConfiguration.enableRemoteModule === false
             && this.debugConfiguration.contextIsolation === true
-            && this.debugConfiguration.preloadBridge === true) return {
+            && this.debugConfiguration.preloadBridge === true
+            && this.debugConfiguration.runtimeVerified === true) return {
             id: "renderer_privilege", label: "RENDERER PRIVILEGE", state: "SECURE", actual: "ISOLATED",
             detail: "CONTEXT ISOLATION AND NAMED PRELOAD BRIDGE VERIFIED; NODE AND REMOTE ACCESS DISABLED"
+        };
+        if (this.debugConfiguration.nodeIntegration === false
+            && this.debugConfiguration.enableRemoteModule === false
+            && this.debugConfiguration.contextIsolation === true
+            && this.debugConfiguration.preloadBridge === true) return {
+            id: "renderer_privilege", label: "RENDERER PRIVILEGE", state: "PARTIAL", actual: "VERIFICATION_PENDING",
+            detail: "SECURE WEB PREFERENCES ARE CONFIGURED BUT THE LOADED MAIN WORLD HAS NOT PASSED THE FIXED RUNTIME PROBE"
         };
         if (this.debugConfiguration.preloadBridge === true) return {
             id: "renderer_privilege", label: "RENDERER PRIVILEGE", state: "INSECURE", actual: "LEGACY_COMPATIBILITY",

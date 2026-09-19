@@ -6,6 +6,7 @@ class I3WorkspaceClient {
         this.log = opts.log || (() => {});
         this.getWindowBounds = typeof opts.getWindowBounds === "function" ? opts.getWindowBounds : null;
         this.onApplicationError = typeof opts.onApplicationError === "function" ? opts.onApplicationError : (() => {});
+        this.loadState = typeof opts.loadState === "function" ? opts.loadState : null;
         this.requestId = 0;
         this.pendingRequests = {};
         this.activeExternalId = null;
@@ -55,12 +56,25 @@ class I3WorkspaceClient {
             this.observer.observe(this.viewport);
         }
         this._send("availability", "terminal");
+        if (!this.loadState) return Promise.resolve([]);
+        return Promise.resolve(this.loadState()).then(states => {
+            if (!Array.isArray(states)) return [];
+            states.forEach(state => this._apply(state));
+            return states;
+        }).catch(error => {
+            this.log("warn", "managed application snapshot unavailable");
+            return [];
+        });
     }
 
     geometry() {
         const rect = this.viewport.getBoundingClientRect();
-        const bounds = this.getWindowBounds
-            ? this.getWindowBounds() : require("@electron/remote").getCurrentWindow().getContentBounds();
+        const bounds = this.getWindowBounds ? this.getWindowBounds() : {
+            x: 0,
+            y: 0,
+            width: document.documentElement.clientWidth,
+            height: document.documentElement.clientHeight
+        };
         const scaleX = bounds.width / document.documentElement.clientWidth;
         const scaleY = bounds.height / document.documentElement.clientHeight;
         return {
@@ -108,6 +122,13 @@ class I3WorkspaceClient {
         ["running", "minimized", "fullscreen", "state"].forEach(key => {
             if (Object.prototype.hasOwnProperty.call(result, key)) changes[key] = result[key];
         });
+        // A tree scan started before a tab selection can arrive while the new
+        // application's launch/focus is pending. Keep its runtime information,
+        // but do not let that old observation undo the user's selection.
+        const selectingOtherApplication = Object.values(this.pendingRequests).some(request =>
+            ["launch", "focus", "restore", "focusNomad"].includes(request.operation)
+            && request.appId === this.manager.activeSlotId && request.appId !== result.appId);
+        if (result.observed && changes.state === "ACTIVE" && selectingOtherApplication) changes.state = "RUNNING";
         const passiveStateForActiveSlot = changes.state === "RUNNING" || (result.observed && changes.state === "HIDDEN");
         if (passiveStateForActiveSlot && this.manager.activeSlotId === result.appId) changes.state = "ACTIVE";
         if (changes.state === "ACTIVE") {
@@ -144,4 +165,4 @@ class I3WorkspaceClient {
     }
 }
 
-if (typeof module !== "undefined" && typeof window === "undefined") module.exports = {I3WorkspaceClient};
+if (typeof module !== "undefined" && typeof window === "undefined") module["exports"] = {I3WorkspaceClient};

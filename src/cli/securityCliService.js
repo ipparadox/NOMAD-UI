@@ -28,6 +28,9 @@ class SecurityCliService {
         else if (typeof repositoryRoot === "string" && repositoryRoot.startsWith("~/")) {
             repositoryRoot = path.join(home, repositoryRoot.slice(2));
         }
+        if (typeof repositoryRoot === "string" && repositoryRoot.trim()) {
+            repositoryRoot = path.resolve(repositoryRoot);
+        }
         const appRoot = opts.appRoot || path.resolve(__dirname, "..", "..");
         this.pathPolicyService = opts.pathPolicyService || new SecurityPathPolicyService(opts);
         this.firewallService = opts.firewallService || new SecurityFirewallService({
@@ -40,6 +43,7 @@ class SecurityCliService {
         const pathPolicy = this.pathPolicyService.resolve("NORMAL");
         this.storageService = opts.storageService || new SecurityStoragePolicyService(Object.assign({}, opts, {
             runner: opts.commandRunner,
+            repositoryPath: repositoryRoot,
             protectedPaths: [
                 appRoot,
                 repositoryRoot,

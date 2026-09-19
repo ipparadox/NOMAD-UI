@@ -66,6 +66,7 @@ manager.focus("terminal");
 assert.strictEqual(manager.activeSlotId, "terminal");
 assert.strictEqual(operations("focusNomad").length, 1);
 assert.strictEqual(operations("focusNomad")[0].appId, "terminal");
+client._apply({ok: true, appId: "terminal", requestId: operations("focusNomad")[0].requestId});
 
 sent.length = 0;
 observe("browser", "ACTIVE", {discovered: true});
@@ -154,6 +155,18 @@ launcherClient._apply({
 assert.strictEqual(launcherManager.activeSlotId, "terminal");
 assert.strictEqual(launcherManager.getSlot("code"), null);
 assert.deepStrictEqual(launcherErrors, [["APPLICATION NOT FOUND", "code"]]);
+
+// An old focused-window scan must not steal a newly selected application while
+// its native launch is pending. Later genuine native focus still synchronizes.
+launcherManager.synchronize("code", {state: "ACTIVE", running: true});
+launcherManager.focus("browser");
+const browserLaunch = launcherSent.filter(([, request]) => request.operation === "launch" && request.appId === "browser").pop()[1];
+launcherClient._apply({ok: true, appId: "code", status: "RUNNING", state: "ACTIVE", running: true, observed: true});
+assert.strictEqual(launcherManager.activeSlotId, "browser");
+assert.strictEqual(launcherClient.activeExternalId, "browser");
+launcherClient._apply({ok: true, appId: "browser", requestId: browserLaunch.requestId, status: "RUNNING", state: "RUNNING", running: true});
+launcherClient._apply({ok: true, appId: "code", status: "RUNNING", state: "ACTIVE", running: true, observed: true});
+assert.strictEqual(launcherManager.activeSlotId, "code");
 
 delete global.window;
 console.log("I3 workspace logical focus ownership regressions passed");

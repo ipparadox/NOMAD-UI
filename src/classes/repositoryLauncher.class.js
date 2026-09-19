@@ -18,6 +18,7 @@ class RepositoryLauncher {
             ? opts.onInputCaptureChange : (() => {});
         this.getActiveId = typeof opts.getActiveId === "function" ? opts.getActiveId : (() => null);
         this.onResume = typeof opts.onResume === "function" ? opts.onResume : (() => false);
+        this.onselect = typeof opts.onselect === "function" ? opts.onselect : (() => {});
         this.repositories = [];
         this.status = null;
         this.isOpen = false;
@@ -75,6 +76,7 @@ class RepositoryLauncher {
         this._renderRepositories();
 
         if (selectedId && !this.repositories.some(repository => repository.id === selectedId)) {
+            this.onselect(null);
             this.close({restoreFocus: false});
         } else if (this.isOpen) {
             this._renderMenu();
@@ -89,6 +91,10 @@ class RepositoryLauncher {
         if (!this.isOpen) this.previousActiveId = this.getActiveId();
         this._setInputCapture(false);
         this.selectedRepositoryId = repository.id;
+        this.onselect(repository.id, Object.freeze({
+            id: repository.id,
+            displayName: repository.displayName
+        }));
         this.selectedActionIndex = 0;
         this.view = "actions";
         this.info = null;
@@ -365,6 +371,10 @@ class RepositoryLauncher {
         }
         this.busy = false;
         this.cloneCancellationRequested = false;
+        if (result && result.review === true) {
+            this.close({restoreFocus: false, resume: false});
+            return true;
+        }
         if (!result || !result.ok) {
             this._showError(result && typeof result.status === "string" ? result.status : "CLONE FAILED");
             if (this.cloneInputElement) this.cloneInputElement.focus({preventScroll: true});
@@ -862,4 +872,4 @@ class RepositoryLauncher {
     }
 }
 
-if (typeof module !== "undefined" && typeof window === "undefined") module.exports = {RepositoryLauncher};
+if (typeof module !== "undefined" && typeof window === "undefined") module["exports"] = {RepositoryLauncher};

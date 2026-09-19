@@ -1,6 +1,7 @@
 const assert = require("assert");
 const {
     AutomountPolicyController,
+    SecurityStoragePolicyService,
     classifyStorageMounts,
     parseStorageLsblk,
     parseStorageMountInfo,
@@ -63,6 +64,23 @@ const ambiguous = classifyStorageMounts(ambiguousMounts, devices, {
 assert.strictEqual(ambiguous.state, "AMBIGUOUS");
 assert.strictEqual(ambiguous.ambiguous, true);
 assert.strictEqual(verifyUnmountCandidate(inventory.eligible[0], ambiguous), false, "ambiguity must fail closed");
+const ambiguousService = new SecurityStoragePolicyService({
+    sources: {mountInfo: `${mountInfo}\n30 24 65:1 / /mnt/mystery rw - ext4 /dev/sdz1 rw`, lsblk},
+    rootPath: "/",
+    repositoryPath: "/mnt/repos/example",
+    protectedPaths: ["/mnt/nomad/NOMAD-UI", "/mnt/repos/example"],
+    env: {XDG_RUNTIME_DIR: "/run/user/1000"}
+});
+const ambiguousDiagnostic = ambiguousService.inspect(false);
+assert.strictEqual(ambiguousDiagnostic.observation, "AMBIGUOUS");
+assert.strictEqual(ambiguousDiagnostic.rootBacking, "INTERNAL");
+assert.strictEqual(ambiguousDiagnostic.repositoryBacking, "INTERNAL");
+assert.strictEqual(ambiguousDiagnostic.eligibleCount, 1, "known candidates remain visible to the internal audit");
+assert.strictEqual(ambiguousDiagnostic.safeUnmountCandidates, 0,
+    "no candidate is safe to unmount while any storage boundary remains ambiguous");
+assert.strictEqual(ambiguousDiagnostic.reason, "PORTABLE BOOT STORAGE BOUNDARY NOT VERIFIED");
+assert(!Object.keys(ambiguousDiagnostic).some(key => /force|ignore|unsafe/i.test(key)),
+    "ambiguous storage diagnostics must not expose an override");
 
 const internalOutsideAllowlist = parseStorageMountInfo(`${mountInfo}\n31 24 8:81 / /home/host rw - ext4 /dev/sdf1 rw`);
 const outsideDevices = parseStorageLsblk(JSON.stringify({blockdevices: JSON.parse(lsblk).blockdevices.concat([

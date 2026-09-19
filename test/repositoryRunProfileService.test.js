@@ -127,6 +127,26 @@ function run() {
         fs.symlinkSync(outsideManifest, path.join(repositoryPath, "package.json"));
         assert(!service.discover(repository).some(profile => profile.profileId.startsWith("npm-")), "symlinked metadata must be refused");
 
+        fs.unlinkSync(path.join(repositoryPath, "package.json"));
+        const cargoManifest = `[package]\nname = "rhex"\nversion = "0.1.0"\n\n# This text is data, never a command\n`;
+        fs.writeFileSync(path.join(repositoryPath, "Cargo.toml"), cargoManifest);
+        fs.writeFileSync(path.join(repositoryPath, "Cargo.lock"), "version = 3\n");
+        const cargo = service.discover(repository).find(profile => profile.profileId === "cargo-run");
+        assert(cargo);
+        assert.deepStrictEqual([cargo.profileId, cargo.displayName, cargo.executable, cargo.args],
+            ["cargo-run", "CARGO RUN", "cargo", ["run"]]);
+        assert.deepStrictEqual(cargo.source, {kind: "cargo-manifest", reference: "Cargo.toml"});
+        const cargoFingerprint = cargo.profileFingerprint;
+        fs.appendFileSync(path.join(repositoryPath, "Cargo.lock"), "[[package]]\nname = \"dependency\"\n");
+        assert.notStrictEqual(service.discover(repository).find(profile => profile.profileId === "cargo-run").profileFingerprint, cargoFingerprint,
+            "Cargo.lock changes must invalidate the exact run profile fingerprint");
+        const outsideCargo = path.join(temporaryRoot, "outside-Cargo.toml");
+        fs.writeFileSync(outsideCargo, "[package]\nname='outside'\n");
+        fs.unlinkSync(path.join(repositoryPath, "Cargo.toml"));
+        fs.symlinkSync(outsideCargo, path.join(repositoryPath, "Cargo.toml"));
+        assert(!service.discover(repository).some(profile => profile.profileId === "cargo-run"),
+            "symlinked Cargo manifests must be refused");
+
         const noProfilePath = path.join(temporaryRoot, "no-profile");
         fs.mkdirSync(noProfilePath);
         assert.deepStrictEqual(service.discover(Object.assign({}, repository, {canonicalPath: noProfilePath})), []);

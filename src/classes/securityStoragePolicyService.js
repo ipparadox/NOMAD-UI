@@ -161,7 +161,16 @@ function verifyUnmountCandidate(candidate, freshInventory) {
     return sameMountIdentity(candidate, current);
 }
 
-function sanitizeStoragePlan(inventory, verbose = false) {
+function storageBackingForPath(mounts, devices, candidatePath, pathModule = path) {
+    const mount = mountForPath(mounts, candidatePath, pathModule);
+    if (!mount || !Array.isArray(devices)) return "UNKNOWN";
+    const device = devices.find(item => (item.majorMinor && item.majorMinor === mount.majorMinor)
+        || (item.devicePath && item.devicePath === mount.source));
+    if (!device || typeof device.rootRemovable !== "boolean") return "UNKNOWN";
+    return device.rootRemovable ? "REMOVABLE" : "INTERNAL";
+}
+
+function sanitizeStoragePlan(inventory, verbose = false, context = null) {
     const result = {
         state: ["VERIFIED", "AMBIGUOUS", "UNKNOWN"].includes(inventory && inventory.state)
             ? inventory.state : "UNKNOWN",
@@ -172,6 +181,17 @@ function sanitizeStoragePlan(inventory, verbose = false) {
         removableCount: Array.isArray(inventory && inventory.removable) ? inventory.removable.length : 0,
         manualRemountPreventionVerified: false
     };
+    if (context && typeof context === "object") {
+        result.observation = result.state;
+        result.rootBacking = ["INTERNAL", "REMOVABLE", "UNKNOWN"].includes(context.rootBacking)
+            ? context.rootBacking : "UNKNOWN";
+        result.repositoryBacking = ["INTERNAL", "REMOVABLE", "UNKNOWN"].includes(context.repositoryBacking)
+            ? context.repositoryBacking : "UNKNOWN";
+        result.safeUnmountCandidates = result.ambiguous ? 0 : result.eligibleCount;
+        result.reason = result.ambiguous
+            ? "PORTABLE BOOT STORAGE BOUNDARY NOT VERIFIED"
+            : (result.eligibleCount ? "STRICTLY IDENTIFIED INTERNAL MOUNTS REQUIRE REVIEW" : "NO SAFE UNMOUNT CANDIDATES");
+    }
     if (verbose) result.eligibleMounts = (inventory && inventory.eligible || []).map(item => item.mountPoint).slice(0, 64);
     return result;
 }
@@ -265,6 +285,9 @@ class SecurityStoragePolicyService {
         this.resolveExecutable = opts.resolveExecutable || (command => resolveTrustedSecurityTool(command, opts));
         this.protectedPaths = Array.isArray(opts.protectedPaths) ? opts.protectedPaths.slice() : [];
         this.safeUnmountRoots = opts.safeUnmountRoots || SAFE_UNMOUNT_ROOTS;
+        this.rootPath = typeof opts.rootPath === "string" && this.path.isAbsolute(opts.rootPath) ? opts.rootPath : "/";
+        this.repositoryPath = typeof opts.repositoryPath === "string" && this.path.isAbsolute(opts.repositoryPath)
+            ? opts.repositoryPath : null;
     }
 
     inspect(verbose = false) {
@@ -276,7 +299,12 @@ class SecurityStoragePolicyService {
             runtimePath: this.environment.XDG_RUNTIME_DIR,
             safeUnmountRoots: this.safeUnmountRoots
         });
-        return Object.assign({inventory}, sanitizeStoragePlan(inventory, verbose));
+        const backing = {
+            rootBacking: storageBackingForPath(mounts, devices, this.rootPath, this.path),
+            repositoryBacking: this.repositoryPath
+                ? storageBackingForPath(mounts, devices, this.repositoryPath, this.path) : "UNKNOWN"
+        };
+        return Object.assign({inventory}, sanitizeStoragePlan(inventory, verbose, backing));
     }
 
     _source(id, filename) {
@@ -322,6 +350,7 @@ module.exports = {
     parseStorageMountInfo,
     sameMountIdentity,
     sanitizeStoragePlan,
+    storageBackingForPath,
     verifyUnmountCandidate,
     withinRoot
 };

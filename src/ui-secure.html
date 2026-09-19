@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self' ws://127.0.0.1:*; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>NOMAD-UI</title>
+
+        <link rel="stylesheet" href="node_modules/augmented-ui/augmented.css" />
+        <link rel="stylesheet" href="node_modules/xterm/css/xterm.css" />
+        <link rel="stylesheet" href="assets/css/main.css" />
+        <link rel="stylesheet" href="assets/css/main_shell.css" />
+        <link rel="stylesheet" href="assets/css/workspace.css" />
+        <link rel="stylesheet" href="assets/css/repository.css" />
+        <link rel="stylesheet" href="assets/css/keyboard.css" />
+        <link rel="stylesheet" href="assets/css/mod_column.css" />
+        <link rel="stylesheet" href="assets/css/mod_clock.css" />
+        <link rel="stylesheet" href="assets/css/mod_sysinfo.css" />
+        <link rel="stylesheet" href="assets/css/mod_hardwareInspector.css" />
+        <link rel="stylesheet" href="assets/css/mod_cpuinfo.css" />
+        <link rel="stylesheet" href="assets/css/mod_ramwatcher.css" />
+        <link rel="stylesheet" href="assets/css/mod_toplist.css" />
+        <link rel="stylesheet" href="assets/css/mod_processlist.css" />
+        <link rel="stylesheet" href="assets/css/mod_netstat.css" />
+        <link rel="stylesheet" href="assets/css/mod_globe.css" />
+        <link rel="stylesheet" href="assets/css/mod_conninfo.css" />
+        <link rel="stylesheet" href="assets/css/boot_screen.css" />
+        <link rel="stylesheet" href="assets/css/extra_ratios.css" />
+        <link rel="stylesheet" href="assets/css/control_plane.css" />
+
+        <script src="node_modules/xterm/lib/xterm.js"></script>
+        <script src="node_modules/xterm-addon-attach/lib/xterm-addon-attach.js"></script>
+        <script src="node_modules/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
+        <script src="node_modules/howler/dist/howler.min.js"></script>
+        <script src="node_modules/smoothie/smoothie.js"></script>
+        <script src="assets/vendor/encom-globe.js"></script>
+
+        <script src="classes/managedApplications.js"></script>
+        <script src="classes/workspaceManager.class.js"></script>
+        <script src="classes/applicationLauncher.class.js"></script>
+        <script src="classes/i3WorkspaceClient.class.js"></script>
+        <script src="classes/inputCapture.class.js"></script>
+        <script src="classes/repositoryLauncher.class.js"></script>
+        <script src="classes/secureKeyboard.class.js"></script>
+        <script src="classes/secureTerminalClient.class.js"></script>
+        <script src="classes/secureTelemetry.class.js"></script>
+        <script src="classes/controlPlaneView.class.js"></script>
+    </head>
+    <body class="solidBackground">
+        <section id="boot_screen" class="nomad_secure_boot_screen">
+            <div id="nomad_secure_bootstrap_status" role="status" aria-live="polite">
+                <h1>NOMAD // SECURE RENDERER</h1>
+                <p><span>STAGE</span><span>DOM</span></p>
+                <p><span>STATUS</span><span>INITIALIZING</span></p>
+                <p><span>REFERENCE</span><span>NMD-DOM-000</span></p>
+                <footer>RETURN TO SAFE SESSION</footer>
+            </div>
+        </section>
+        <script src="_renderer_secure.js"></script>
+    </body>
+</html>

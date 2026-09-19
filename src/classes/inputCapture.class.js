@@ -47,4 +47,4 @@ class InputCaptureController {
     }
 }
 
-if (typeof module !== "undefined" && typeof window === "undefined") module.exports = {InputCaptureController};
+if (typeof module !== "undefined" && typeof window === "undefined") module["exports"] = {InputCaptureController};

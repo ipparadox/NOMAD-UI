@@ -91,7 +91,7 @@ function applicationMap(applications = MANAGED_APPLICATIONS) {
 }
 
 if (typeof module !== "undefined" && typeof window === "undefined") {
-    module.exports = {
+    module["exports"] = {
         APPLICATION_TYPES,
         APPLICATION_STATES,
         LOCKDOWN_BUILTIN_APPLICATION_IDS,

@@ -9,6 +9,8 @@ const FINGERPRINT_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const MAX_TRUST_STORE_BYTES = 1024 * 1024;
 const MAX_TRUSTED_PROFILES = 512;
 const MAX_PACKAGE_JSON_BYTES = 1024 * 1024;
+const MAX_CARGO_MANIFEST_BYTES = 1024 * 1024;
+const MAX_CARGO_LOCK_BYTES = 4 * 1024 * 1024;
 const MAX_ARGS = 32;
 const MAX_ARGUMENT_LENGTH = 4096;
 const TRUST_STORE_ROOT_KEYS = new Set(["version", "profiles"]);
@@ -348,6 +350,25 @@ class RepositoryRunProfileService {
                     }));
                 });
             }
+        }
+
+        const cargoManifest = this._readTopLevelFile(repository.canonicalPath, "Cargo.toml", MAX_CARGO_MANIFEST_BYTES);
+        if (cargoManifest !== null) {
+            const cargoLock = this._readTopLevelFile(repository.canonicalPath, "Cargo.lock", MAX_CARGO_LOCK_BYTES);
+            candidates.push(this._candidate({
+                profileId: "cargo-run",
+                displayName: "CARGO RUN",
+                commandLabel: "cargo run",
+                executable: "cargo",
+                args: ["run"],
+                source: {kind: "cargo-manifest", reference: "Cargo.toml"},
+                sourceDefinition: {
+                    kind: "cargo-manifest",
+                    manifestFingerprint: fingerprint(cargoManifest),
+                    lockFingerprint: cargoLock === null ? "ABSENT" : fingerprint(cargoLock),
+                    fixedProfile: "cargo-run"
+                }
+            }));
         }
 
         [["main.py", "python-main", "PYTHON MAIN"], ["app.py", "python-app", "PYTHON APP"]].forEach(spec => {

@@ -3,13 +3,14 @@ const {
     inventoryEnvironment,
     sanitizeEnvironmentInPlace
 } = require("./classes/securityEnvironmentService.js");
-const productionMode = process.env.NOMAD_PRODUCTION === "1";
+// Compatibility rendering requires an explicit development opt-in.
+const productionMode = process.env.NOMAD_PRODUCTION === "1" || process.env.NOMAD_DEVELOPMENT !== "1";
 const environmentBeforeSanitization = inventoryEnvironment(process.env);
 if (productionMode) sanitizeEnvironmentInPlace(process.env, {NOMAD_PRODUCTION: "1"});
 const environmentAfterSanitization = inventoryEnvironment(process.env);
 
 const signale = require("signale");
-const {app, BrowserWindow, dialog, shell} = require("electron");
+const {app, BrowserWindow, clipboard, dialog, shell} = require("electron");
 
 process.on("uncaughtException", e => {
     signale.fatal(productionMode ? sanitizeRendererLog(e && e.message) : e);
@@ -44,17 +45,18 @@ if (!gotLock) {
 signale.time("Startup");
 
 const electron = require("electron");
-require('@electron/remote/main').initialize()
 const ipc = electron.ipcMain;
 const path = require("path");
 const url = require("url");
 const fs = require("fs");
 const crypto = require("crypto");
+const os = require("os");
 const which = require("which");
 const {Terminal, normalizeTerminalPort} = require("./classes/terminal.class.js");
 const {
     I3WindowManager,
-    handleWindowManagerRequest
+    handleWindowManagerRequest,
+    publicWindowManagerResult
 } = require("./classes/i3WindowManager.class.js");
 const {
     ApplicationRegistry,
@@ -81,6 +83,21 @@ const {
     handleSecurityStatusRequest
 } = require("./classes/securityService.js");
 const {handleTerminalOperation} = require("./classes/terminalForegroundProcessController.js");
+const {ControlPlaneService, validateControlRequest} = require("./classes/controlPlaneService.js");
+const {RendererSystemService} = require("./classes/rendererSystemService.js");
+const {RendererTelemetryService} = require("./classes/rendererTelemetryService.js");
+const {ManagedApplicationGeometryService} = require("./classes/managedApplicationGeometryService.js");
+const managedGeometryService = new ManagedApplicationGeometryService();
+const {
+    attachRendererLifecycleDiagnostics,
+    attachSecureProgressDiagnostics,
+    rendererVerificationReport
+} = require("./classes/rendererDiagnostics.js");
+const {ApplicationService} = require("./cli/applicationService.js");
+const {InstallService} = require("./cli/installService.js");
+const {PACKAGE_CATALOG} = require("./cli/packageCatalog.js");
+
+if (!productionMode) require("@electron/remote/main").initialize();
 
 const rendererLogLevels = new Set(["info", "warn", "error", "debug", "note"]);
 function sanitizeRendererLog(content) {
@@ -107,32 +124,44 @@ ipc.on("log", (e, type, content) => {
     if (!rendererLogLevels.has(type)) return;
     signale[type](sanitizeRendererLog(content));
 });
-ipc.on("nomad.runtime.window-bounds", (event, request) => {
-    if (!request || typeof request !== "object" || Array.isArray(request) || Object.keys(request).length) {
-        event.returnValue = null;
-        return;
-    }
-    const owner = BrowserWindow.fromWebContents(event.sender);
-    if (!rendererOwnsRequest(event.sender) || !owner || owner.isDestroyed()) {
-        event.returnValue = null;
-        return;
-    }
-    const bounds = owner.getContentBounds();
-    event.returnValue = {x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height};
-});
-
 var win, tty, extraTtys, i3WindowManager, applicationRegistry, repositoryService, repositoryActions, repositoryGitService;
 var repositoryRunProfiles, repositoryProcessManager;
 var repositoryIsolationService, securityProfileService, securityService, securityEnforcementService;
 var securityFirewallService, securityPathPolicyService, securityStoragePolicyService, automountPolicyController;
 var applicationPolicyService, runtimePathPolicy;
+var controlPlaneService, rendererSystemService, rendererTelemetryService, applicationControlService, installService;
+let themeOverride = null;
+let kbOverride = null;
+let rendererPreloadIsolated = false;
 let repositoryShutdownComplete = false;
 let repositoryShutdownPromise = null;
 const terminalConnectionTokens = new Map();
 function rendererOwnsRequest(sender) {
     return Boolean(win && !win.isDestroyed() && sender === win.webContents);
 }
-ipc.on("nomad.terminal.connection", (event, request) => {
+function managedApplicationGeometry() {
+    return managedGeometryService.get(win);
+}
+ipc.on("nomad.renderer.preload-state", (event, state) => {
+    if (!productionMode || !rendererOwnsRequest(event.sender)) return;
+    if (!state || typeof state !== "object" || Array.isArray(state) || Object.keys(state).length !== 2
+        || state.contextIsolated !== true || state.bridgeVersion !== 1) {
+        logNomadEvent("warn", "Renderer diagnostic: event=preload-state code=INVALID description=isolated preload state rejected");
+        return;
+    }
+    rendererPreloadIsolated = true;
+    logNomadEvent("info", "Renderer diagnostic: event=preload-state code=OK description=isolated preload state accepted");
+});
+ipc.on("nomad.renderer.preload-diagnostic", (event, diagnostic) => {
+    if (!productionMode || !rendererOwnsRequest(event.sender) || !diagnostic || typeof diagnostic !== "object"
+        || Array.isArray(diagnostic) || Object.keys(diagnostic).length !== 3
+        || !/^(START|BRIDGE|STATE|COMPLETE)$/.test(diagnostic.stage || "")
+        || !/^[A-Za-z0-9_.-]{1,64}$/.test(diagnostic.code || "")
+        || typeof diagnostic.description !== "string") return;
+    const level = diagnostic.code === "OK" ? "info" : "error";
+    logNomadEvent(level, `Renderer diagnostic: event=preload-stage stage=${diagnostic.stage} code=${diagnostic.code} description=${diagnostic.description}`);
+});
+if (!productionMode) ipc.on("nomad.terminal.connection", (event, request) => {
     event.returnValue = null;
     if (!rendererOwnsRequest(event.sender) || !request || typeof request !== "object"
         || Array.isArray(request) || Object.keys(request).length !== 1) return;
@@ -166,6 +195,8 @@ const kblayoutsDir = path.join(electron.app.getPath("userData"), "keyboards");
 const innerKblayoutsDir = path.join(__dirname, "assets/kb_layouts");
 const fontsDir = path.join(electron.app.getPath("userData"), "fonts");
 const innerFontsDir = path.join(__dirname, "assets/fonts");
+const rendererThemesDir = productionMode ? innerThemesDir : themesDir;
+const rendererKeyboardsDir = productionMode ? innerKblayoutsDir : kblayoutsDir;
 
 // Unset proxy env variables to avoid connection problems on the internal websockets
 // See #222
@@ -282,6 +313,158 @@ if (typeof versionHistory[version] === "undefined") {
 }
 fs.writeFileSync(versionHistoryPath, JSON.stringify(versionHistory, 0, 2), {encoding:"utf-8"});
 
+const RENDERER_SETTING_KEYS = new Set([
+    "username", "keyboard", "virtualKeyboard", "theme", "termFontSize", "audio", "audioVolume",
+    "disableFeedbackAudio", "clockHours", "monitor", "nointro", "nocursor", "allowWindowed",
+    "keepGeometry", "excludeThreadsFromToplist", "hideDotfiles", "fsListView", "experimentalGlobeFeatures"
+]);
+
+function rendererSettingsPatchValid(patch, themeIds, keyboardIds) {
+    if (!patch || typeof patch !== "object" || Array.isArray(patch)
+        || Object.keys(patch).length === 0 || Object.keys(patch).some(key => !RENDERER_SETTING_KEYS.has(key))) return false;
+    const booleans = [
+        "virtualKeyboard", "audio", "disableFeedbackAudio", "nointro", "nocursor", "allowWindowed",
+        "keepGeometry", "excludeThreadsFromToplist", "hideDotfiles", "fsListView", "experimentalGlobeFeatures"
+    ];
+    if (booleans.some(key => Object.prototype.hasOwnProperty.call(patch, key) && typeof patch[key] !== "boolean")) return false;
+    if (Object.prototype.hasOwnProperty.call(patch, "username")
+        && (typeof patch.username !== "string" || patch.username.length > 64 || /[\u0000-\u001f\u007f]/.test(patch.username))) return false;
+    if (Object.prototype.hasOwnProperty.call(patch, "theme") && !themeIds.includes(patch.theme)) return false;
+    if (Object.prototype.hasOwnProperty.call(patch, "keyboard") && !keyboardIds.includes(patch.keyboard)) return false;
+    if (Object.prototype.hasOwnProperty.call(patch, "termFontSize")
+        && (!Number.isInteger(patch.termFontSize) || patch.termFontSize < 8 || patch.termFontSize > 48)) return false;
+    if (Object.prototype.hasOwnProperty.call(patch, "audioVolume")
+        && (!Number.isFinite(patch.audioVolume) || patch.audioVolume < 0 || patch.audioVolume > 1)) return false;
+    if (Object.prototype.hasOwnProperty.call(patch, "clockHours") && ![12, 24].includes(patch.clockHours)) return false;
+    if (Object.prototype.hasOwnProperty.call(patch, "monitor")
+        && (!Number.isInteger(patch.monitor) || patch.monitor < 0 || patch.monitor > 31)) return false;
+    return true;
+}
+
+function writeFixedJson(filename, value) {
+    const temporary = `${filename}.tmp-${process.pid}-${crypto.randomBytes(12).toString("hex")}`;
+    let descriptor;
+    try {
+        const current = fs.lstatSync(filename);
+        if (!current.isFile() || current.isSymbolicLink() || current.nlink !== 1
+            || (typeof process.getuid === "function" && current.uid !== process.getuid())) return false;
+        descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+        fs.fchmodSync(descriptor, 0o600);
+        fs.writeFileSync(descriptor, `${JSON.stringify(value, null, 4)}\n`, {encoding: "utf8"});
+        fs.fsyncSync(descriptor);
+        fs.closeSync(descriptor);
+        descriptor = undefined;
+        fs.renameSync(temporary, filename);
+        return true;
+    } catch (error) {
+        try { if (typeof descriptor === "number") fs.closeSync(descriptor); } catch (closeError) {}
+        try { fs.unlinkSync(temporary); } catch (unlinkError) {}
+        return false;
+    }
+}
+
+function rendererAssetIds(directory, suffix) {
+    try {
+        return fs.readdirSync(directory).filter(name => name.endsWith(suffix))
+            .map(name => name.slice(0, -suffix.length))
+            .filter(name => /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/.test(name)).sort();
+    } catch (error) {
+        return [];
+    }
+}
+
+function readRendererJson(directory, id, fallbackId) {
+    const selected = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/.test(id || "") ? id : fallbackId;
+    for (const candidate of [selected, fallbackId]) {
+        try {
+            const filename = path.join(directory, `${candidate}.json`);
+            if (path.dirname(filename) !== directory) continue;
+            const stats = fs.lstatSync(filename);
+            if (!stats.isFile() || stats.isSymbolicLink() || stats.size > 4 * 1024 * 1024) continue;
+            return JSON.parse(fs.readFileSync(filename, {encoding: "utf8"}));
+        } catch (error) {}
+    }
+    return null;
+}
+
+function readRendererGlobeGrid() {
+    try {
+        const filename = path.join(__dirname, "assets", "misc", "grid.json");
+        const stats = fs.lstatSync(filename);
+        if (!stats.isFile() || stats.isSymbolicLink() || stats.size > 2 * 1024 * 1024) return null;
+        const source = JSON.parse(fs.readFileSync(filename, {encoding: "utf8"}));
+        if (!source || !Array.isArray(source.tiles) || source.tiles.length > 10000) return null;
+        const tiles = source.tiles.map(tile => {
+            if (!tile || !Number.isFinite(tile.lat) || !Number.isFinite(tile.lon)
+                || !Array.isArray(tile.b) || tile.b.length > 16) throw new Error("invalid globe tile");
+            return {
+                lat: tile.lat,
+                lon: tile.lon,
+                b: tile.b.map(point => {
+                    if (!point || ![point.x, point.y, point.z].every(Number.isFinite)) throw new Error("invalid globe point");
+                    return {x: point.x, y: point.y, z: point.z};
+                })
+            };
+        });
+        return {tiles};
+    } catch (error) {
+        return null;
+    }
+}
+
+function rendererBootstrap(settings) {
+    const themeIds = rendererAssetIds(rendererThemesDir, ".json");
+    const keyboardIds = rendererAssetIds(rendererKeyboardsDir, ".json");
+    const selectedTheme = themeOverride && themeIds.includes(themeOverride) ? themeOverride : settings.theme;
+    const selectedKeyboard = kbOverride && keyboardIds.includes(kbOverride) ? kbOverride : settings.keyboard;
+    const projectedSettings = {
+        username: typeof settings.username === "string" ? settings.username : "",
+        virtualKeyboard: settings.virtualKeyboard !== false,
+        termFontSize: Number.isInteger(settings.termFontSize) ? settings.termFontSize : 15,
+        audio: settings.audio !== false,
+        audioVolume: Number.isFinite(settings.audioVolume) ? settings.audioVolume : 1,
+        disableFeedbackAudio: settings.disableFeedbackAudio === true,
+        clockHours: settings.clockHours === 12 ? 12 : 24,
+        monitor: Number.isInteger(settings.monitor) ? settings.monitor : 0,
+        nointro: settings.nointro === true,
+        nocursor: settings.nocursor === true,
+        allowWindowed: settings.allowWindowed === true,
+        keepGeometry: settings.keepGeometry !== false,
+        excludeThreadsFromToplist: settings.excludeThreadsFromToplist !== false,
+        hideDotfiles: settings.hideDotfiles === true,
+        fsListView: settings.fsListView === true,
+        experimentalGlobeFeatures: settings.experimentalGlobeFeatures === true,
+        port: Number.isSafeInteger(Number(settings.port)) ? Number(settings.port) : 3000,
+        theme: themeIds.includes(selectedTheme) ? selectedTheme : "tron",
+        keyboard: keyboardIds.includes(selectedKeyboard) ? selectedKeyboard : "en-US"
+    };
+    let bootLog = "";
+    try { bootLog = fs.readFileSync(path.join(__dirname, "assets", "misc", "boot_log.txt"), {encoding: "utf8"}).slice(0, 1024 * 1024); } catch (error) {}
+    let archLinux = false;
+    try { archLinux = fs.readFileSync("/etc/os-release", {encoding: "utf8"}).includes("Arch Linux"); } catch (error) {}
+    let displayName = projectedSettings.username || "";
+    if (!displayName) {
+        try { displayName = os.userInfo().username; } catch (error) {}
+    }
+    return {
+        settings: projectedSettings,
+        shortcuts: [],
+        theme: readRendererJson(rendererThemesDir, projectedSettings.theme, "tron"),
+        keyboardLayout: readRendererJson(rendererKeyboardsDir, projectedSettings.keyboard, "en-US"),
+        globeGrid: readRendererGlobeGrid(),
+        themeIds,
+        keyboardIds,
+        displayCount: electron.screen.getAllDisplays().length,
+        displayName: String(displayName || "").replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 64),
+        appVersion: app.getVersion(),
+        platform: process.platform,
+        runtime: rendererSystemService ? rendererSystemService.runtime() : {platform: process.platform, type: os.type(), uptime: Math.floor(os.uptime())},
+        argv: {nointro: process.argv.includes("--nointro"), nocursor: process.argv.includes("--nocursor")},
+        bootLog,
+        archLinux
+    };
+}
+
 function createWindow(settings) {
     signale.info("Creating window...");
 
@@ -309,25 +492,70 @@ function createWindow(settings) {
         webPreferences: {
             preload: path.join(__dirname, "preload.js"),
             devTools: !productionMode,
-            enableRemoteModule: true,
-            contextIsolation: false,
+            enableRemoteModule: !productionMode,
+            contextIsolation: productionMode,
             backgroundThrottling: false,
             webSecurity: true,
-            nodeIntegration: true,
+            nodeIntegration: !productionMode,
             nodeIntegrationInSubFrames: false,
             allowRunningInsecureContent: false,
-            experimentalFeatures: settings.experimentalFeatures || false
+            experimentalFeatures: !productionMode && settings.experimentalFeatures === true,
+            additionalArguments: productionMode ? ["--nomad-secure-renderer"] : []
         }
     });
 
-    win.loadURL(url.format({
-        pathname: path.join(__dirname, 'ui.html'),
+    const rendererUrl = url.format({
+        pathname: path.join(__dirname, productionMode ? "ui-secure.html" : "ui.html"),
         protocol: 'file:',
         slashes: true
-    }));
+    });
+    if (productionMode) attachRendererLifecycleDiagnostics(win, {log: logNomadEvent});
+    if (productionMode) attachSecureProgressDiagnostics(win, logNomadEvent);
+    if (productionMode) win.webContents.on("did-start-navigation", (event, navigationUrl, isInPlace, isMainFrame) => {
+        if (isMainFrame === false || isInPlace === true) return;
+        rendererPreloadIsolated = false;
+        if (securityService) securityService.debugConfiguration.runtimeVerified = false;
+    });
+    if (productionMode) win.webContents.on("did-finish-load", async () => {
+        let probe = null;
+        try {
+            probe = await win.webContents.executeJavaScript(`(() => ({
+                requireType: typeof globalThis.require,
+                processType: typeof globalThis.process,
+                moduleType: typeof globalThis.module,
+                bridgeType: typeof globalThis.nomad,
+                bridgeKeys: globalThis.nomad ? Object.keys(globalThis.nomad).sort() : []
+            }))()`, true);
+        } catch (error) {
+            logNomadEvent("error", `Renderer diagnostic: event=runtime-verification-exception description=${sanitizeRendererLog(error && error.message)}`);
+        }
+        const verification = rendererVerificationReport({
+            rendererPreloadIsolated,
+            currentUrl: win.webContents.getURL(),
+            expectedUrl: rendererUrl,
+            probe
+        });
+        const verified = verification.verified;
+        if (securityService) {
+            securityService.debugConfiguration.runtimeVerified = verified === true;
+            securityService.debugConfiguration.nodeIntegration = !(probe && probe.requireType === "undefined"
+                && probe.processType === "undefined" && probe.moduleType === "undefined");
+            securityService.debugConfiguration.contextIsolation = rendererPreloadIsolated;
+            securityService.debugConfiguration.preloadBridge = Boolean(probe && probe.bridgeType === "object");
+        }
+        if (!verified) {
+            logNomadEvent("warn", `Production renderer isolation runtime verification failed; failed predicates: ${verification.failed.join(", ")}; security status remains non-compliant`);
+        } else {
+            logNomadEvent("info", "Production renderer isolation runtime verification passed; renderer status is secure and isolated");
+        }
+    });
+    win.loadURL(rendererUrl);
+    if (!productionMode) require("@electron/remote/main").enable(win.webContents);
 
     signale.complete("Frontend window created!");
     win.show();
+    win.on("resize", () => win.webContents.send("nomad.window.resize", {}));
+    win.on("leave-full-screen", () => win.webContents.send("nomad.window.leave-fullscreen", {}));
     win.on("move", () => win.webContents.send("window-manager-geometry-changed"));
     electron.screen.on("display-metrics-changed", () => {
         if (win && !win.isDestroyed()) win.webContents.send("window-manager-geometry-changed");
@@ -364,6 +592,112 @@ app.on('ready', async () => {
     signale.info(productionMode ? `Shell resolved: ${path.basename(settings.shell)}` : `Shell found at ${settings.shell}`);
     signale.success(`Settings loaded!`);
 
+    rendererSystemService = new RendererSystemService({pingTarget: settings.pingAddr || "1.1.1.1"});
+    rendererTelemetryService = new RendererTelemetryService({
+        pingTarget: settings.pingAddr || "1.1.1.1",
+        preferredInterface: settings.iface || null,
+        log: logNomadEvent
+    });
+    ipc.handle("nomad.runtime.bootstrap.get", (event, request) => {
+        if (!rendererOwnsRequest(event.sender) || !request || typeof request !== "object"
+            || Array.isArray(request) || Object.keys(request).length) return null;
+        try { return rendererBootstrap(settings); } catch (error) { return null; }
+    });
+    if (!productionMode) ipc.on("nomad.runtime.bootstrap", (event, request) => {
+        event.returnValue = null;
+        if (!rendererOwnsRequest(event.sender) || !request || typeof request !== "object"
+            || Array.isArray(request) || Object.keys(request).length) return;
+        try { event.returnValue = rendererBootstrap(settings); } catch (error) { event.returnValue = null; }
+    });
+    ipc.handle("nomad.system.query", (event, request) => rendererOwnsRequest(event.sender)
+        ? rendererSystemService.query(request) : {ok: false, status: "INVALID REQUEST"});
+    ipc.handle("nomad.system.ping", (event, request) => {
+        if (!rendererOwnsRequest(event.sender) || !request || typeof request !== "object"
+            || Array.isArray(request) || Object.keys(request).length) return {ok: false, status: "INVALID REQUEST"};
+        return rendererSystemService.ping();
+    });
+    ipc.handle("nomad.system.telemetry.get", (event, request) => {
+        if (!rendererOwnsRequest(event.sender) || !request || typeof request !== "object"
+            || Array.isArray(request) || Object.keys(request).length) {
+            return {ok: false, status: "INVALID REQUEST"};
+        }
+        return rendererTelemetryService.getSystemTelemetry();
+    });
+    ipc.handle("nomad.network.telemetry.get", (event, request) => {
+        if (!rendererOwnsRequest(event.sender) || !request || typeof request !== "object"
+            || Array.isArray(request) || Object.keys(request).length) {
+            return {ok: false, status: "INVALID REQUEST"};
+        }
+        return rendererTelemetryService.getNetworkTelemetry();
+    });
+    ipc.handle("nomad.settings.update", (event, patch) => {
+        if (!rendererOwnsRequest(event.sender)) return {ok: false, status: "INVALID REQUEST"};
+        const themeIds = rendererAssetIds(rendererThemesDir, ".json");
+        const keyboardIds = rendererAssetIds(rendererKeyboardsDir, ".json");
+        if (!rendererSettingsPatchValid(patch, themeIds, keyboardIds)) return {ok: false, status: "INVALID SETTINGS"};
+        const next = Object.assign({}, settings, patch);
+        if (!writeFixedJson(settingsFile, next)) return {ok: false, status: "SETTINGS WRITE REFUSED"};
+        settings = next;
+        return {ok: true, status: "SETTINGS SAVED", settings: rendererBootstrap(settings).settings};
+    });
+    ipc.handle("nomad.settings.theme", (event, request) => {
+        if (!rendererOwnsRequest(event.sender) || !request || typeof request !== "object" || Array.isArray(request)
+            || Object.keys(request).length !== 1 || !rendererAssetIds(rendererThemesDir, ".json").includes(request.themeId)) {
+            return {ok: false, status: "INVALID THEME"};
+        }
+        themeOverride = request.themeId;
+        return {ok: true, status: "THEME SELECTED"};
+    });
+    ipc.handle("nomad.settings.keyboard", (event, request) => {
+        if (!rendererOwnsRequest(event.sender) || !request || typeof request !== "object" || Array.isArray(request)
+            || Object.keys(request).length !== 1 || !rendererAssetIds(rendererKeyboardsDir, ".json").includes(request.keyboardId)) {
+            return {ok: false, status: "INVALID KEYBOARD"};
+        }
+        kbOverride = request.keyboardId;
+        return {ok: true, status: "KEYBOARD SELECTED"};
+    });
+    ipc.handle("nomad.settings.open-document", async (event, request) => {
+        if (!rendererOwnsRequest(event.sender) || !request || typeof request !== "object" || Array.isArray(request)
+            || Object.keys(request).length !== 1 || !["settings", "shortcuts"].includes(request.documentId)) {
+            return {ok: false, status: "INVALID DOCUMENT"};
+        }
+        let selectedProfile = "UNKNOWN";
+        try { selectedProfile = securityProfileService.get().profile; } catch (error) {}
+        if (productionMode && !["NORMAL", "PUBLIC"].includes(selectedProfile)) {
+            return {ok: false, status: "EXTERNAL DOCUMENT EDITOR BLOCKED BY SECURITY POLICY"};
+        }
+        const result = await shell.openPath(request.documentId === "settings" ? settingsFile : shortcutsFile);
+        if (!result && win && !win.isDestroyed()) win.minimize();
+        return {ok: !result, status: result ? "DOCUMENT OPEN FAILED" : "DOCUMENT OPENED"};
+    });
+    ipc.handle("nomad.window.action", (event, request) => {
+        if (!rendererOwnsRequest(event.sender) || !request || typeof request !== "object" || Array.isArray(request)
+            || Object.keys(request).length !== 1 || !["focus", "minimize", "toggle-fullscreen", "restart", "quit", "toggle-devtools"].includes(request.action)
+            || !win || win.isDestroyed()) return {ok: false, status: "INVALID WINDOW ACTION"};
+        if (request.action === "focus") win.focus();
+        else if (request.action === "minimize") win.minimize();
+        else if (request.action === "toggle-fullscreen") win.setFullScreen(!win.isFullScreen());
+        else if (request.action === "restart") { app.relaunch(); app.quit(); }
+        else if (request.action === "quit") app.quit();
+        else if (request.action === "toggle-devtools") {
+            if (productionMode) return {ok: false, status: "DEVTOOLS DISABLED"};
+            win.webContents.toggleDevTools();
+        }
+        return {ok: true, status: "WINDOW ACTION COMPLETE"};
+    });
+    ipc.handle("nomad.terminal.clipboard-read", (event, request) => {
+        if (!rendererOwnsRequest(event.sender) || !request || typeof request !== "object"
+            || Array.isArray(request) || Object.keys(request).length) return {ok: false, status: "INVALID REQUEST"};
+        return {ok: true, text: clipboard.readText().slice(0, 1024 * 1024)};
+    });
+    ipc.handle("nomad.terminal.connection.get", (event, request) => {
+        if (!rendererOwnsRequest(event.sender) || !request || typeof request !== "object"
+            || Array.isArray(request) || Object.keys(request).length !== 1) return null;
+        const port = normalizeTerminalPort(request.port);
+        const authToken = port === null ? null : terminalConnectionTokens.get(port);
+        return typeof authToken === "string" ? {port, authToken} : null;
+    });
+
     if (!require("fs").existsSync(settings.cwd)) throw new Error("Configured cwd path does not exist.");
 
     // See #366
@@ -389,9 +723,10 @@ app.on('ready', async () => {
     securityFirewallService = new SecurityFirewallService({env: process.env});
     const resolvedRepositoryRoot = settings.repositoryRoot === "~" ? process.env.HOME
         : (settings.repositoryRoot.startsWith("~/")
-            ? path.join(process.env.HOME, settings.repositoryRoot.slice(2)) : settings.repositoryRoot);
+            ? path.join(process.env.HOME, settings.repositoryRoot.slice(2)) : path.resolve(settings.repositoryRoot));
     securityStoragePolicyService = new SecurityStoragePolicyService({
         env: process.env,
+        repositoryPath: resolvedRepositoryRoot,
         protectedPaths: [
             path.resolve(__dirname, ".."),
             resolvedRepositoryRoot,
@@ -425,11 +760,13 @@ app.on('ready', async () => {
         productionMode,
         debugConfiguration: {
             devTools: !productionMode,
-            nodeIntegration: true,
-            enableRemoteModule: true,
-            contextIsolation: false,
+            nodeIntegration: !productionMode,
+            enableRemoteModule: !productionMode,
+            contextIsolation: productionMode,
             preloadBridge: true,
-            experimentalFeatures: settings.experimentalFeatures === true
+            compatibilityRenderer: !productionMode,
+            runtimeVerified: false,
+            experimentalFeatures: !productionMode && settings.experimentalFeatures === true
         }
     });
     ipc.handle("security.status", (event, request) => rendererOwnsRequest(event.sender)
@@ -528,8 +865,18 @@ app.on('ready', async () => {
             return i3WindowManager.openGithubRepository(githubUrl, geometry);
         }
     });
-    ipc.handle("repository-operation", (event, request) => {
+    ipc.handle("repository-operation", async (event, request) => {
         if (!rendererOwnsRequest(event.sender)) return {ok: false, status: "INVALID REQUEST"};
+        if (productionMode && request && (request.operation === "clone"
+            || (request.operation === "action" && request.actionId === "pull"))) {
+            return {ok: false, status: "USE NOMAD CONTROL PLANE"};
+        }
+        let trustedRequest = request;
+        if (productionMode && request && request.operation === "action") {
+            if (Object.prototype.hasOwnProperty.call(request, "geometry")) return {ok: false, status: "INVALID REQUEST"};
+            trustedRequest = Object.assign({}, request);
+            if (["code", "github"].includes(request.actionId)) trustedRequest.geometry = await managedApplicationGeometry();
+        }
         if (request && request.operation !== "cancel-clone") {
             try {
                 const currentSettings = JSON.parse(fs.readFileSync(settingsFile, {encoding: "utf8"}));
@@ -538,14 +885,16 @@ app.on('ready', async () => {
                 signale.warn("Repository settings reload failed; retaining the active repository root");
             }
         }
-        return handleRepositoryRequest(repositoryActions, request);
+        return handleRepositoryRequest(repositoryActions, trustedRequest);
     });
 
-    // Support for multithreaded systeminformation calls
-    signale.pending("Starting multithreaded calls controller...");
-    require("./_multithread.js");
-
-    createWindow(settings);
+    // The legacy development renderer keeps its compatibility-only
+    // systeminformation proxy. Production uses RendererSystemService's fixed
+    // method enum through the preload bridge.
+    if (!productionMode) {
+        signale.pending("Starting development compatibility calls controller...");
+        require("./_multithread.js");
+    }
 
     const managedApplicationEnvironment = productionMode ? buildProductionEnvironment(
         process.env,
@@ -560,14 +909,30 @@ app.on('ready', async () => {
         env: managedApplicationEnvironment,
         log: logNomadEvent,
         onState: state => {
-            if (win && !win.isDestroyed()) win.webContents.send("window-manager-state", state);
+            if (win && !win.isDestroyed()) win.webContents.send("window-manager-state",
+                productionMode ? publicWindowManagerResult(state) : state);
         }
     });
     await i3WindowManager.initialize();
-    ipc.on("window-manager-operation", async (event, request) => {
+    if (!productionMode) ipc.on("window-manager-operation", async (event, request) => {
         if (!rendererOwnsRequest(event.sender)) return;
         const result = await handleWindowManagerRequest(i3WindowManager, request);
         if (!event.sender.isDestroyed()) event.sender.send("window-manager-state", result);
+    });
+    ipc.on("nomad.workspace.operate", async (event, request) => {
+        if (!productionMode || !rendererOwnsRequest(event.sender) || !request || typeof request !== "object"
+            || Array.isArray(request) || Object.keys(request).some(key => !["requestId", "operation", "appId"].includes(key))) return;
+        const geometryOperations = new Set(["launch", "focus", "restore", "unfullscreen", "geometry"]);
+        const trustedRequest = Object.assign({}, request);
+        if (geometryOperations.has(request.operation)) trustedRequest.geometry = await managedApplicationGeometry();
+        const result = await handleWindowManagerRequest(i3WindowManager, trustedRequest);
+        if (!event.sender.isDestroyed()) event.sender.send("window-manager-state", publicWindowManagerResult(result));
+    });
+    ipc.handle("nomad.workspace.snapshot.get", async (event, request) => {
+        if (!productionMode || !rendererOwnsRequest(event.sender) || !request || typeof request !== "object"
+            || Array.isArray(request) || Object.keys(request).length) return [];
+        const states = await i3WindowManager.snapshot();
+        return states.map(publicWindowManagerResult);
     });
 
     // Support for more terminals, used for creating tabs (currently limited to 4 extra terms)
@@ -578,11 +943,7 @@ app.on('ready', async () => {
         extraTtys[basePort+i] = null;
     }
 
-    ipc.on("ttyspawn", (e, arg) => {
-        if (!rendererOwnsRequest(e.sender) || arg !== "true") {
-            if (!e.sender.isDestroyed()) e.sender.send("ttyspawn-reply", "ERROR: invalid request");
-            return;
-        }
+    const createExtraTerminal = () => {
         let port = null;
         Object.keys(extraTtys).forEach(key => {
             if (extraTtys[key] === null && port === null) {
@@ -593,7 +954,7 @@ app.on('ready', async () => {
 
         if (port === null) {
             signale.error("TTY spawn denied (Reason: exceeded max TTYs number)");
-            e.sender.send("ttyspawn-reply", "ERROR: max number of ttys reached");
+            return {ok: false, status: "MAXIMUM TERMINALS REACHED"};
         } else {
             signale.pending(`Creating new TTY process on port ${port}`);
             const terminalPort = normalizeTerminalPort(port);
@@ -635,27 +996,101 @@ app.on('ready', async () => {
             };
 
             extraTtys[port] = term;
-            e.sender.send("ttyspawn-reply", "SUCCESS: "+port);
+            return {ok: true, status: "TERMINAL CREATED", port: terminalPort};
         }
+    };
+    ipc.handle("nomad.terminal.create", (event, request) => {
+        if (!rendererOwnsRequest(event.sender) || !request || typeof request !== "object"
+            || Array.isArray(request) || Object.keys(request).length) return {ok: false, status: "INVALID REQUEST"};
+        return createExtraTerminal();
     });
 
+    if (!productionMode) ipc.on("ttyspawn", (event, arg) => {
+        if (!rendererOwnsRequest(event.sender) || arg !== "true") {
+            if (!event.sender.isDestroyed()) event.sender.send("ttyspawn-reply", "ERROR: invalid request");
+            return;
+        }
+        const result = createExtraTerminal();
+        if (!event.sender.isDestroyed()) event.sender.send("ttyspawn-reply", result.ok
+            ? `SUCCESS: ${result.port}` : `ERROR: ${result.status.toLowerCase()}`);
+    });
+
+    applicationControlService = new ApplicationService({
+        registryPath: applicationRegistry.registryPath,
+        env: managedApplicationEnvironment,
+        log: logNomadEvent
+    });
+    installService = new InstallService({
+        applicationService: applicationControlService,
+        env: managedApplicationEnvironment
+    });
+    controlPlaneService = new ControlPlaneService({
+        securityService,
+        profileService: securityProfileService,
+        enforcementService: securityEnforcementService,
+        repositoryActions,
+        applicationRegistry,
+        applicationPolicy: applicationPolicyService,
+        windowManager: i3WindowManager,
+        applicationService: applicationControlService,
+        installService,
+        packageCatalog: PACKAGE_CATALOG,
+        getGeometry: managedApplicationGeometry,
+        onApplicationsChanged: applications => {
+            i3WindowManager.setApplications(applications);
+            if (win && !win.isDestroyed()) win.webContents.send("nomad.control.applications-changed", {});
+        }
+    });
+    ipc.handle("nomad.control.request", (event, request) => {
+        if (!rendererOwnsRequest(event.sender) || !validateControlRequest(request)) {
+            return {ok: false, status: "UNKNOWN TRUSTED ACTION"};
+        }
+        return controlPlaneService.request(request);
+    });
+    ipc.handle("nomad.control.confirm", (event, request) => rendererOwnsRequest(event.sender)
+        ? controlPlaneService.confirm(request) : {ok: false, status: "CONFIRMATION INVALID"});
+    ipc.handle("nomad.control.cancel", (event, request) => rendererOwnsRequest(event.sender)
+        ? controlPlaneService.cancel(request) : {ok: false, status: "CONFIRMATION INVALID"});
+    ipc.handle("nomad.control.context", (event, request) => rendererOwnsRequest(event.sender)
+        ? controlPlaneService.setContext(request) : {ok: false, status: "INVALID CONTEXT"});
+    ipc.handle("nomad.assistant.interpret", (event, request) => {
+        if (!rendererOwnsRequest(event.sender) || !request || typeof request !== "object" || Array.isArray(request)
+            || Object.keys(request).length !== 1 || typeof request.input !== "string") {
+            return {ok: false, status: "INTENT INPUT INVALID"};
+        }
+        return controlPlaneService.interpret(request.input);
+    });
+
+    createWindow(settings);
+    if (productionMode) {
+        rendererTelemetryService.start({
+            systemInterval: 1000,
+            networkInterval: 1000,
+            locationCachePath: path.join(electron.app.getPath("userData"), "geoIPcache"),
+            onSystemTelemetry: telemetry => {
+                if (win && !win.isDestroyed()) win.webContents.send("nomad.system.telemetry", telemetry);
+            },
+            onNetworkTelemetry: telemetry => {
+                if (win && !win.isDestroyed()) win.webContents.send("nomad.network.telemetry", telemetry);
+            }
+        });
+    }
+
     // Backend support for theme and keyboard hotswitch
-    let themeOverride = null;
-    let kbOverride = null;
-    ipc.on("getThemeOverride", (e, arg) => {
+    if (!productionMode) ipc.on("getThemeOverride", (e, arg) => {
         if (!rendererOwnsRequest(e.sender)) return;
         e.sender.send("getThemeOverride", themeOverride);
     });
-    ipc.on("getKbOverride", (e, arg) => {
+    if (!productionMode) ipc.on("getKbOverride", (e, arg) => {
         if (!rendererOwnsRequest(e.sender)) return;
         e.sender.send("getKbOverride", kbOverride);
     });
-    ipc.on("setThemeOverride", (e, arg) => {
+    if (!productionMode) ipc.on("setThemeOverride", (e, arg) => {
         if (rendererOwnsRequest(e.sender) && typeof arg === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(arg)) {
             themeOverride = arg;
         }
     });
-    ipc.on("setKbOverride", (e, arg) => {
+    if (!productionMode) ipc.on("setKbOverride", (e, arg) => {
         if (rendererOwnsRequest(e.sender) && typeof arg === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(arg)) {
             kbOverride = arg;
         }
@@ -671,6 +1106,7 @@ app.on('web-contents-created', (e, contents) => {
     // Prevent creating more than one window
     contents.on('new-window', (e, url) => {
         e.preventDefault();
+        if (productionMode) return;
         try {
             const target = new URL(url);
             const browser = applicationRegistry && applicationRegistry.get("browser");
@@ -711,6 +1147,7 @@ app.on('before-quit', event => {
         return;
     }
     repositoryShutdownComplete = true;
+    if (rendererTelemetryService) rendererTelemetryService.stop();
     if (i3WindowManager) i3WindowManager.destroy();
     if (tty) tty.close();
     Object.keys(extraTtys || {}).forEach(key => {

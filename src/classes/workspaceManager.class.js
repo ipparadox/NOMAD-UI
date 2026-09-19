@@ -248,4 +248,4 @@ class WorkspaceManager {
     }
 }
 
-if (typeof module !== "undefined" && typeof window === "undefined") module.exports = {WorkspaceManager};
+if (typeof module !== "undefined" && typeof window === "undefined") module["exports"] = {WorkspaceManager};

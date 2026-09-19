@@ -107,6 +107,22 @@ function renderSecurityPlan(write, plan) {
     write(`TARGET PROFILE: ${plan.targetProfile}`);
     write(`PREFLIGHT: ${plan.status}`);
     if (plan.helper) write(`PRIVILEGED HELPER: ${plan.helper.status}`);
+    if (plan.storage) {
+        const observation = plan.storage.observation || plan.storage.state || "UNKNOWN";
+        const safeUnmountCandidates = Number.isSafeInteger(plan.storage.safeUnmountCandidates)
+            ? plan.storage.safeUnmountCandidates : (Number.isSafeInteger(plan.storage.eligibleCount)
+                ? plan.storage.eligibleCount : 0);
+        write("");
+        write("HOST STORAGE");
+        write(`OBSERVATION: ${observation}`);
+        write(`ROOT BACKING: ${plan.storage.rootBacking || "UNKNOWN"}`);
+        write(`REPOSITORY BACKING: ${plan.storage.repositoryBacking || "UNKNOWN"}`);
+        write(`SAFE UNMOUNT CANDIDATES: ${safeUnmountCandidates}`);
+        if (plan.storage.ambiguous === true) {
+            write(`${plan.targetProfile}: NON_COMPLIANT`);
+            write(`REASON: ${plan.storage.reason || "PORTABLE BOOT STORAGE BOUNDARY NOT VERIFIED"}`);
+        }
+    }
     write("");
     write(table(["CATEGORY", "CURRENT", "DESIRED", "ACTION", "PRIVILEGED", "AVAILABLE"],
         (plan.categories || []).map(category => [
@@ -124,7 +140,9 @@ function renderSecurityPlan(write, plan) {
     }
     if (plan.storage && Array.isArray(plan.storage.eligibleMounts) && plan.storage.eligibleMounts.length) {
         write("");
-        write("STRICTLY ELIGIBLE INTERNAL MOUNTS (REVALIDATED IMMEDIATELY BEFORE ACTION)");
+        write(plan.storage.ambiguous === true
+            ? "OBSERVED INTERNAL MOUNTS (NOT ACTIONABLE WHILE STORAGE IS AMBIGUOUS)"
+            : "STRICTLY ELIGIBLE INTERNAL MOUNTS (REVALIDATED IMMEDIATELY BEFORE ACTION)");
         plan.storage.eligibleMounts.forEach(mountPoint => write(`- ${mountPoint}`));
     }
     if (plan.sessionRestartRequired) write("SESSION RESTART REQUIRED");
@@ -574,8 +592,16 @@ async function runCli(argv, opts = {}) {
                     ["FIREWALL", result.firewallVerified ? "VERIFIED" : result.firewall.verificationResult],
                     ["AUTOMOUNT", result.automount],
                     ["EPHEMERAL STATE", result.ephemeral],
-                    ["STORAGE OBSERVATION", result.storage.state]
+                    ["STORAGE OBSERVATION", result.storage.observation || result.storage.state],
+                    ["ROOT BACKING", result.storage.rootBacking || "UNKNOWN"],
+                    ["REPOSITORY BACKING", result.storage.repositoryBacking || "UNKNOWN"],
+                    ["SAFE UNMOUNT CANDIDATES", Number.isSafeInteger(result.storage.safeUnmountCandidates)
+                        ? result.storage.safeUnmountCandidates : (result.storage.eligibleCount || 0)]
                 ];
+                if (result.storage.ambiguous === true) rows.push([
+                    "STORAGE REASON",
+                    result.storage.reason || "PORTABLE BOOT STORAGE BOUNDARY NOT VERIFIED"
+                ]);
                 if (result.systemVerification) {
                     rows.push(["SYSTEM HELPER", result.systemVerification.status]);
                     rows.push(["SYSTEM STORAGE", result.systemVerification.storage]);

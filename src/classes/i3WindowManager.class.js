@@ -103,6 +103,27 @@ function validateWindowManagerRequest(request) {
     };
 }
 
+function publicWindowManagerResult(result) {
+    if (!result || typeof result !== "object" || Array.isArray(result)) {
+        return {ok: false, appId: null, status: "WINDOW MANAGER RESPONSE INVALID"};
+    }
+    const appId = normalizeApplicationId(result.appId);
+    const output = {
+        ok: result.ok === true,
+        appId,
+        status: typeof result.status === "string"
+            ? result.status.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 96) : "WINDOW MANAGER RESPONSE INVALID"
+    };
+    if (Number.isSafeInteger(result.requestId) && result.requestId >= 0) output.requestId = result.requestId;
+    if (["AVAILABLE", "LAUNCHING", "RUNNING", "ACTIVE", "HIDDEN", "CLOSED"].includes(result.state)) {
+        output.state = result.state;
+    }
+    ["running", "minimized", "fullscreen", "visible", "focused", "discovered", "observed"].forEach(key => {
+        if (typeof result[key] === "boolean") output[key] = result[key];
+    });
+    return output;
+}
+
 async function handleWindowManagerRequest(manager, request) {
     const validated = validateWindowManagerRequest(request);
     if (!validated.ok) return validated;
@@ -165,6 +186,28 @@ class I3WindowManager {
     destroy() {
         if (this._monitor) clearInterval(this._monitor);
         this._monitor = null;
+    }
+
+    async snapshot() {
+        if (!this.available) return [];
+        await this._checkManagedWindows();
+        return Object.keys(this.applications).map(appId => {
+            const state = this.windowStates[appId];
+            if (!state || !this.windows[appId]) {
+                return this._result(true, appId, "AVAILABLE", {
+                    state: "AVAILABLE", running: false, minimized: false, fullscreen: false
+                });
+            }
+            const lifecycle = state.focused ? "ACTIVE" : (state.visible ? "RUNNING" : "HIDDEN");
+            return this._result(true, appId, lifecycle === "HIDDEN" ? "HIDDEN" : "RUNNING", {
+                state: lifecycle,
+                running: true,
+                minimized: state.hidden === true,
+                visible: state.visible === true,
+                focused: state.focused === true,
+                observed: true
+            });
+        });
     }
 
     async operate(operation, appId, geometry) {
@@ -570,5 +613,6 @@ module.exports = {
     handleWindowManagerRequest,
     i3TreeChildren,
     normalizeGeometry,
+    publicWindowManagerResult,
     validateWindowManagerRequest
 };

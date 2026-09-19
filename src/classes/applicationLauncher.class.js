@@ -259,4 +259,4 @@ class ApplicationLauncher {
     }
 }
 
-if (typeof module !== "undefined" && typeof window === "undefined") module.exports = {ApplicationLauncher};
+if (typeof module !== "undefined" && typeof window === "undefined") module["exports"] = {ApplicationLauncher};

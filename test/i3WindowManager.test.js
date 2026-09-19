@@ -1,5 +1,5 @@
 const assert = require("assert");
-const {I3WindowManager} = require("../src/classes/i3WindowManager.class.js");
+const {I3WindowManager, publicWindowManagerResult} = require("../src/classes/i3WindowManager.class.js");
 
 const WINDOW_PROPERTIES = {
     code: {instance: "code", class: "code"},
@@ -69,6 +69,12 @@ async function run() {
     assert.strictEqual(first.containerId, 303);
     assert.strictEqual(second.containerId, 303);
     assert.strictEqual(first.running, true);
+    const projected = publicWindowManagerResult(Object.assign({requestId: 4, observed: true}, first));
+    assert.strictEqual(projected.requestId, 4);
+    assert.strictEqual(projected.observed, true);
+    assert.strictEqual(projected.running, true);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(projected, "containerId"), false,
+        "renderer window state must not expose raw i3 container identities");
 
     manager._managedWindow = async () => ({id: 303, scratchpad_state: "fresh"});
     await manager._show("code", geometry);
@@ -146,6 +152,12 @@ async function run() {
     assert.strictEqual(browserStates[0].appId, "browser");
     assert.strictEqual(browserStates[0].state, "ACTIVE");
     assert.strictEqual(browserStates.length, 1, "focused BROWSER must remain stable across polls");
+    const snapshot = await browserManager.snapshot();
+    assert.strictEqual(snapshot.find(state => state.appId === "browser").state, "ACTIVE");
+    assert.strictEqual(snapshot.find(state => state.appId === "browser").running, true);
+    assert.strictEqual(snapshot.find(state => state.appId === "code").state, "AVAILABLE");
+    assert(snapshot.every(state => !Object.prototype.hasOwnProperty.call(publicWindowManagerResult(state), "containerId")),
+        "initial workspace projection must not expose i3 container identities");
 
     const backgroundStates = [];
     const backgroundManager = new I3WindowManager({onState: state => backgroundStates.push(state)});

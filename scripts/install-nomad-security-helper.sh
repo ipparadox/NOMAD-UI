@@ -38,7 +38,7 @@ trusted_root_executable() {
     local parent_path=""
     [[ "$executable" == /* && -x "$executable" ]] || return 1
     canonical="$("$READLINK_EXECUTABLE" -f -- "$executable" 2>/dev/null || true)"
-    [[ "$canonical" == /* ]] || return 1
+    [[ "$canonical" == /* && -f "$canonical" ]] || return 1
     owner="$("$STAT_EXECUTABLE" -c '%u' -- "$canonical" 2>/dev/null || true)"
     mode="$("$STAT_EXECUTABLE" -c '%a' -- "$canonical" 2>/dev/null || true)"
     [[ "$owner" == "0" && "$mode" =~ ^[0-7]{3,4}$ && $((8#$mode & 022)) -eq 0 ]] || return 1
@@ -135,6 +135,11 @@ printf 'NOMAD SECURITY HELPER INSTALLATION PLAN\n'
 printf 'Install root-owned helper: %s (0755)\n' "$HELPER_TARGET"
 printf 'Install root-owned policy: %s (0600)\n' "$CONFIG_TARGET"
 printf 'Runtime prerequisite: trusted root-owned %s\n' "$NODE_EXECUTABLE"
+if trusted_root_executable "$NODE_EXECUTABLE"; then
+    printf 'Helper runtime state: AVAILABLE (fixed root-owned runtime verified)\n'
+else
+    printf 'Helper runtime state: UNAVAILABLE (fail closed; NVM and user-writable runtimes are never accepted)\n'
+fi
 printf 'Policy to install:\n'
 render_policy
 printf 'No firewall or mount change is performed by this installer.\n'

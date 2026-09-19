@@ -81,6 +81,9 @@ async function run() {
     assert.strictEqual(launcher.isOpen, true);
     assert.strictEqual(workspace.activeSlotId, "browser", "selection must not change the workspace");
     assert.deepStrictEqual(actions, []);
+    await launcher.refresh();
+    assert.strictEqual(launcher.selectedRepositoryId, repositoryId, "trusted refresh must preserve the selected repository context");
+    assert.strictEqual(launcher.isOpen, true);
 
     const down = keyEvent("ArrowDown");
     launcher._handleKeydown(down);

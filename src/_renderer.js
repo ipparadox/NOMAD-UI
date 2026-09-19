@@ -40,15 +40,9 @@ const electron = require("electron");
 const remote = require("@electron/remote");
 const ipc = electron.ipcRenderer;
 const nomadBridge = window.nomad || null;
-const nomadWindowManagerIpc = nomadBridge ? {
-    on: (channel, callback) => {
-        if (channel === "window-manager-state") return nomadBridge.windowManager.onState(payload => callback(null, payload));
-        if (channel === "window-manager-geometry-changed") return nomadBridge.windowManager.onGeometryChanged(payload => callback(null, payload));
-        return () => {};
-    },
-    send: (channel, request) => channel === "window-manager-operation"
-        && nomadBridge.windowManager.send(request)
-} : ipc;
+// The legacy development renderer deliberately retains direct Electron IPC.
+// Production never loads this file and uses the narrow preload bridge instead.
+const nomadWindowManagerIpc = ipc;
 const nomadTerminalOperationIpc = nomadBridge ? {
     invoke: (channel, operation) => {
         if (channel !== "terminal-operation") return Promise.resolve({ok: false, status: "INVALID REQUEST"});
@@ -617,7 +611,7 @@ async function initUI() {
         ipc: nomadWindowManagerIpc,
         manager: window.workspaceManager,
         viewport: document.getElementById("workspace_viewport"),
-        getWindowBounds: nomadBridge ? () => nomadBridge.runtime.windowBounds() : null,
+        getWindowBounds: () => remote.getCurrentWindow().getContentBounds(),
         log: (level, message) => console[level](`[workspace] ${message}`),
         onApplicationError: message => {
             if (window.applicationLauncher) window.applicationLauncher.showError(message);

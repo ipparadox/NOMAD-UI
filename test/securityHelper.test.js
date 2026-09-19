@@ -99,6 +99,10 @@ assert(!source.includes("shell: true"));
 assert(!source.includes("execSync("));
 assert(!source.includes("execFileSync("));
 assert(!source.includes("process.argv.slice(3)"));
+assert(source.includes('env: {PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C"}'));
+assert(!source.includes("NODE_OPTIONS"));
+assert(!source.includes("NODE_PATH"));
+assert(!source.includes("shell: true"));
 
 class MockApplyRuntime extends HelperRuntime {
     constructor(options = {}) {

@@ -28,6 +28,13 @@ async function run() {
         privilegedPending: true,
         sessionRestartRequired: true,
         firewall: {rules: "table inet nomad_security { comment \"PUBLIC\" }"},
+        storage: {
+            state: "AMBIGUOUS", observation: "AMBIGUOUS", ambiguous: true,
+            rootBacking: "INTERNAL", repositoryBacking: "INTERNAL",
+            eligibleCount: 0, safeUnmountCandidates: 0,
+            reason: "PORTABLE BOOT STORAGE BOUNDARY NOT VERIFIED",
+            eligibleMounts: ["/mnt/host"]
+        },
         categories: [{
             id: "network", label: "FIREWALL / NETWORK", current: "NOT_APPLIED",
             desired: "PUBLIC", action: "APPLY_PUBLIC", privileged: true, available: false
@@ -82,6 +89,14 @@ async function run() {
     assert.strictEqual(planned.code, 0);
     assert(planned.stdout.includes("NOMAD SECURITY ENFORCEMENT PLAN"));
     assert(planned.stdout.includes("TRUSTED NFTABLES DRY RUN"));
+    assert(planned.stdout.includes("OBSERVATION: AMBIGUOUS"));
+    assert(planned.stdout.includes("ROOT BACKING: INTERNAL"));
+    assert(planned.stdout.includes("REPOSITORY BACKING: INTERNAL"));
+    assert(planned.stdout.includes("SAFE UNMOUNT CANDIDATES: 0"));
+    assert(planned.stdout.includes("PUBLIC: NON_COMPLIANT"));
+    assert(planned.stdout.includes("REASON: PORTABLE BOOT STORAGE BOUNDARY NOT VERIFIED"));
+    assert(planned.stdout.includes("OBSERVED INTERNAL MOUNTS (NOT ACTIONABLE WHILE STORAGE IS AMBIGUOUS)"));
+    assert(!planned.stdout.includes("STRICTLY ELIGIBLE INTERNAL MOUNTS"));
     assert(planned.stdout.includes("PLAN ONLY"));
     assert.strictEqual(calls.enforce, 0);
 

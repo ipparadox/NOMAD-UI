@@ -50,12 +50,17 @@ function harness(opts = {}) {
     const storageService = {
         inspect: verbose => Object.assign({
             state: opts.storageAmbiguous ? "AMBIGUOUS" : "VERIFIED",
+            observation: opts.storageAmbiguous ? "AMBIGUOUS" : "VERIFIED",
             ambiguous: opts.storageAmbiguous === true,
+            rootBacking: opts.rootBacking || "INTERNAL",
+            repositoryBacking: opts.repositoryBacking || "INTERNAL",
             eligibleCount: opts.eligibleCount || 0,
             protectedCount: opts.protectedCount || 0,
             refusedCount: opts.refusedCount || 0,
             removableCount: 0,
             inventory: {}
+            , reason: opts.storageAmbiguous
+                ? "PORTABLE BOOT STORAGE BOUNDARY NOT VERIFIED" : "NO SAFE UNMOUNT CANDIDATES"
         }, verbose ? {eligibleMounts: opts.eligibleCount ? ["/mnt/host"] : []} : {})
     };
     const pathPolicyService = {
@@ -176,9 +181,20 @@ assert.strictEqual(unjournaledRestore.systemEnforcementPending, true);
 const ambiguous = harness({helperAvailable: true, storageAmbiguous: true});
 const ambiguousPlan = ambiguous.service.plan("LOCKDOWN");
 assert.strictEqual(ambiguousPlan.safeToApply, false);
+assert.strictEqual(ambiguousPlan.storage.observation, "AMBIGUOUS");
+assert.strictEqual(ambiguousPlan.storage.rootBacking, "INTERNAL");
+assert.strictEqual(ambiguousPlan.storage.repositoryBacking, "INTERNAL");
+assert.strictEqual(ambiguousPlan.storage.safeUnmountCandidates, 0);
+assert.strictEqual(ambiguousPlan.storage.reason, "PORTABLE BOOT STORAGE BOUNDARY NOT VERIFIED");
+assert.strictEqual(ambiguousPlan.categories.find(category => category.id === "host_storage").action,
+    "REFUSE UNMOUNT; PORTABLE BOOT STORAGE BOUNDARY NOT VERIFIED");
+assert(!Object.keys(ambiguousPlan).some(key => /force|ignore|unsafe/i.test(key)));
 const ambiguousApply = ambiguous.service.apply("LOCKDOWN", {authorized: true});
 assert.strictEqual(ambiguousApply.applied, false);
 assert.strictEqual(ambiguous.state().profile, "NORMAL");
+const ambiguousWithKnownCandidate = harness({helperAvailable: true, storageAmbiguous: true, eligibleCount: 1});
+assert.strictEqual(ambiguousWithKnownCandidate.service.plan("PUBLIC").storage.safeUnmountCandidates, 0,
+    "global ambiguity must make every apparent candidate ineligible for action");
 assert.strictEqual(ambiguous.calls.helper.length, 0);
 
 const helperFailure = harness({helperAvailable: true, helperFailure: true});

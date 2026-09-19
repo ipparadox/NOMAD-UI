@@ -12,6 +12,7 @@ const HELPER_OPERATIONS = Object.freeze([
     "apply-public", "apply-lockdown", "restore", "verify-firewall", "verify-storage", "status"
 ]);
 const HELPER_OPERATION_SET = new Set(HELPER_OPERATIONS);
+const HELPER_RUNTIME_PATH = "/usr/bin/node";
 const MAX_ENFORCEMENT_STATE_BYTES = 128 * 1024;
 const ENFORCEMENT_STATE_KEYS = new Set([
     "version", "phase", "originalProfile", "enforcedProfile", "updatedAt", "automount", "helper", "sessionRestartRequired"
@@ -282,11 +283,16 @@ class SecurityHelperClient {
     }
 
     capability() {
+        const runtimeTrusted = this._trustedRuntime();
         let stats;
         try {
             stats = this.fs.lstatSync(this.helperPath);
         } catch (error) {
-            return {installed: false, trusted: false, available: false, status: "HELPER NOT INSTALLED"};
+            return {
+                installed: false, trusted: false, available: false,
+                runtime: HELPER_RUNTIME_PATH, runtimeTrusted,
+                status: runtimeTrusted ? "HELPER NOT INSTALLED" : "HELPER NOT INSTALLED; TRUSTED /usr/bin/node RUNTIME UNAVAILABLE"
+            };
         }
         let parentTrusted = true;
         let parentPath = this.path ? this.path.dirname(this.helperPath) : path.dirname(this.helperPath);
@@ -302,15 +308,46 @@ class SecurityHelperClient {
             if (!parentTrusted || parentPath === pathModule.parse(parentPath).root) break;
             parentPath = pathModule.dirname(parentPath);
         }
-        const trusted = !stats.isSymbolicLink() && stats.isFile() && stats.nlink === 1 && stats.uid === 0
+        const helperTrusted = !stats.isSymbolicLink() && stats.isFile() && stats.nlink === 1 && stats.uid === 0
             && (stats.mode & 0o022) === 0 && (stats.mode & 0o111) !== 0 && parentTrusted;
+        const trusted = helperTrusted && runtimeTrusted;
         const elevation = this.uid === 0 || (this.usePkexec && Boolean(this.resolveExecutable("pkexec")));
         return {
             installed: true,
             trusted,
-            available: trusted && elevation,
-            status: !trusted ? "HELPER TRUST CHECK FAILED" : (elevation ? "AVAILABLE" : "EXPLICIT ROOT EXECUTION REQUIRED")
+            available: helperTrusted && runtimeTrusted && elevation,
+            runtime: HELPER_RUNTIME_PATH,
+            runtimeTrusted,
+            status: !helperTrusted ? "HELPER TRUST CHECK FAILED"
+                : (!runtimeTrusted ? "TRUSTED /usr/bin/node RUNTIME UNAVAILABLE"
+                    : (elevation ? "AVAILABLE" : "EXPLICIT ROOT EXECUTION REQUIRED"))
         };
+    }
+
+    _trustedRuntime() {
+        let canonical;
+        let stats;
+        try {
+            canonical = this.fs.realpathSync(HELPER_RUNTIME_PATH);
+            stats = this.fs.statSync(canonical);
+        } catch (error) {
+            return false;
+        }
+        if (!this.path.isAbsolute(canonical) || !stats.isFile() || stats.uid !== 0
+            || (stats.mode & 0o022) !== 0 || (stats.mode & 0o111) === 0) return false;
+        let parentPath = this.path.dirname(canonical);
+        while (true) {
+            let parent;
+            try {
+                parent = this.fs.lstatSync(parentPath);
+                if (parent.isSymbolicLink() || !parent.isDirectory() || parent.uid !== 0
+                    || (parent.mode & 0o022) !== 0 || this.fs.realpathSync(parentPath) !== this.path.resolve(parentPath)) return false;
+            } catch (error) {
+                return false;
+            }
+            if (parentPath === this.path.parse(parentPath).root) return true;
+            parentPath = this.path.dirname(parentPath);
+        }
     }
 
     invoke(operation, opts = {}) {
@@ -325,16 +362,20 @@ class SecurityHelperClient {
             args = [this.helperPath, operation];
         }
         let result;
+        const executionOptions = {
+            encoding: "utf8",
+            env: {
+                PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                LANG: "C"
+            },
+            shell: false,
+            timeout: 30000,
+            maxBuffer: 1024 * 1024,
+            windowsHide: true
+        };
         try {
-            result = this.runner ? this.runner(command, args.slice(), {shell: false, timeout: 30000})
-                : this.spawnSync(command, args, {
-                    encoding: "utf8",
-                    env: {PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
-                    shell: false,
-                    timeout: 30000,
-                    maxBuffer: 1024 * 1024,
-                    windowsHide: true
-                });
+            result = this.runner ? this.runner(command, args.slice(), executionOptions)
+                : this.spawnSync(command, args, executionOptions);
         } catch (error) {
             return {ok: false, status: "HELPER EXECUTION FAILED"};
         }
@@ -425,7 +466,9 @@ class SecurityEnforcementService {
             {
                 id: "host_storage", label: "HOST STORAGE", current: storage.state,
                 desired: restricted ? "UNMOUNT_SAFE_ELIGIBLE_INTERNAL_MOUNTS" : "RESTORE_NOMAD_UNMOUNTS",
-                action: restricted ? `REVALIDATE AND UNMOUNT ${storage.eligibleCount} STRICTLY ELIGIBLE MOUNT(S)`
+                action: restricted && storage.ambiguous
+                    ? "REFUSE UNMOUNT; PORTABLE BOOT STORAGE BOUNDARY NOT VERIFIED"
+                    : restricted ? `REVALIDATE AND UNMOUNT ${storage.eligibleCount} STRICTLY ELIGIBLE MOUNT(S)`
                     : "RESTORE ONLY MOUNTS RECORDED BY THE TRUSTED HELPER",
                 privileged: true, available: helper.available && !storage.ambiguous
             },
@@ -813,6 +856,15 @@ function sanitizePlanStorage(storage, verbose) {
         removableCount: Number.isSafeInteger(storage && storage.removableCount) ? storage.removableCount : 0,
         manualRemountPreventionVerified: storage && storage.manualRemountPreventionVerified === true
     };
+    output.observation = ["VERIFIED", "AMBIGUOUS", "UNKNOWN"].includes(storage && storage.observation)
+        ? storage.observation : output.state;
+    output.rootBacking = ["INTERNAL", "REMOVABLE", "UNKNOWN"].includes(storage && storage.rootBacking)
+        ? storage.rootBacking : "UNKNOWN";
+    output.repositoryBacking = ["INTERNAL", "REMOVABLE", "UNKNOWN"].includes(storage && storage.repositoryBacking)
+        ? storage.repositoryBacking : "UNKNOWN";
+    output.safeUnmountCandidates = output.ambiguous ? 0 : output.eligibleCount;
+    output.reason = typeof (storage && storage.reason) === "string"
+        ? storage.reason.slice(0, 160) : (output.ambiguous ? "PORTABLE BOOT STORAGE BOUNDARY NOT VERIFIED" : "UNKNOWN");
     if (verbose && Array.isArray(storage && storage.eligibleMounts)) {
         output.eligibleMounts = storage.eligibleMounts.slice(0, 64);
     }
@@ -821,6 +873,7 @@ function sanitizePlanStorage(storage, verbose) {
 
 module.exports = {
     HELPER_OPERATIONS,
+    HELPER_RUNTIME_PATH,
     MAX_ENFORCEMENT_STATE_BYTES,
     SecurityEnforcementService,
     SecurityHelperClient,
