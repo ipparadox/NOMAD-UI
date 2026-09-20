@@ -1,3 +1,5 @@
+// Desktop-entry fixtures must have trusted, non-group-writable ownership modes.
+process.umask(0o077);
 const assert = require("assert");
 const {EventEmitter} = require("events");
 const fs = require("fs");
@@ -308,7 +310,7 @@ async function run() {
     assert.deepStrictEqual(spawnCalls[0], {
         executable: "/trusted/bin/sudo",
         args: ["/trusted/bin/apt-get", "install", "--", "vlc"],
-        options: {stdio: "inherit", shell: false}
+        options: {stdio: "inherit", shell: false, env: require("../src/classes/repositoryIsolationService.js").buildRepositoryRunEnvironment(process.env, {PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"})}
     });
     assert(JSON.parse(fs.readFileSync(installRegistry, "utf8")).applications.some(application => application.id === "vlc"));
     assert(installApplicationService.info("vlc").available, "post-install registration must validate availability");

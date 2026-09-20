@@ -22,15 +22,26 @@ class ControlPlaneView {
         this.pending = false;
         this._onGlobalKeydown = event => this._globalKeydown(event);
         this._mount();
+        this.latestAutomation = null;
     }
 
     initialize() {
         this.hostWindow.addEventListener("keydown", this._onGlobalKeydown, true);
+        if (this.bridge.automation) this.unsubscribeAutomation = this.bridge.automation.onState(result => {
+            if (result.kind === "application-stage") {
+                if (this.opened && this.pending) { this._clear(); this._line(result.status, "muted"); }
+                return;
+            }
+            this.latestAutomation = result;
+            this.refreshRepositories();
+            if (this.opened && this.operationId === result.operation.id) this._renderAutomation(result);
+        });
         return this;
     }
 
     destroy() {
         this.close();
+        if (this.unsubscribeAutomation) this.unsubscribeAutomation();
         this.hostWindow.removeEventListener("keydown", this._onGlobalKeydown, true);
         if (this.root) this.root.remove();
         if (this.triggers) this.triggers.remove();
@@ -50,12 +61,12 @@ class ControlPlaneView {
     }
 
     open(mode = "assistant") {
-        if (!['assistant', 'security', 'applications'].includes(mode)) mode = "assistant";
+        if (!['assistant', 'security', 'applications', 'projects'].includes(mode)) mode = "assistant";
         this.mode = mode;
         this.opened = true;
         this.root.hidden = false;
         this.root.dataset.mode = mode;
-        this.title.textContent = mode === "security" ? "SECURITY //" : (mode === "applications" ? "APPLICATIONS //" : "NOMAD //");
+        this.title.textContent = mode === "projects" ? "PROJECTS //" : mode === "security" ? "SECURITY //" : (mode === "applications" ? "APPLICATIONS //" : "NOMAD //");
         this.inputRow.hidden = mode !== "assistant";
         this._clear();
         if (this.inputCapture) this.inputCapture.acquire("nomad-control-plane");
@@ -63,6 +74,9 @@ class ControlPlaneView {
             this.input.value = "";
             this._line("STRUCTURED NOMAD ACTIONS ONLY", "muted");
             this.input.focus({preventScroll: true});
+            if (this.latestAutomation) this.controls.append(this._button("SETUP STATUS", () => this._renderAutomation(this.latestAutomation)));
+        } else if (mode === "projects") {
+            this.request("PROJECT_LIST");
         } else if (mode === "security") {
             this._securityControls();
             this.request("SECURITY_STATUS");
@@ -121,6 +135,7 @@ class ControlPlaneView {
         this.triggers.append(
             this._button("NOMAD", () => this.open("assistant"), "nomad_assistant_trigger"),
             this._button("SECURITY", () => this.open("security"), "nomad_security_trigger"),
+            this._button("PROJECTS", () => this.open("projects"), "nomad_projects_trigger"),
             this._button("APPS", () => this.open("applications"), "nomad_applications_trigger")
         );
         this.root = this.document.createElement("section");
@@ -220,6 +235,30 @@ class ControlPlaneView {
             this._line("NOMAD CONTROL UNAVAILABLE", "error");
             return;
         }
+        if (result.kind === "automation") { this._renderAutomation(result); return; }
+        if (result.kind === "project" && result.project) { this._renderProject(result.project); return; }
+        if (result.kind === "projects") {
+            this._clear();
+            (result.projects || []).forEach(project => {
+                this._line(`${project.displayName} // ${project.type} // ${project.state}`);
+                this.output.append(this._button("SELECT", () => {
+                    this.setSelectedRepository(project.repositoryId, project);
+                    this._renderProject(project);
+                }));
+            });
+            if (!(result.projects || []).length) this._line("NO SUPPORTED PROJECTS DETECTED");
+            return;
+        }
+        if (result.kind === "application-discovery") {
+            this._clear(); this._line(result.status);
+            (result.applications || []).forEach(app => {
+                this._line(`${app.displayName} // ${app.status}`);
+                this.output.append(this._button("ADD TO NOMAD", () => this.request("APPLICATION_REGISTER", app.id)),
+                    this._button("IGNORE", () => this.request("APPLICATION_IGNORE", app.id)));
+            });
+            if (!(result.applications || []).length) this._line("NO NEW MANAGEABLE APPLICATIONS");
+            return;
+        }
         if (result.kind === "plan" && result.plan) {
             this._renderPlan(result);
             return;
@@ -243,6 +282,13 @@ class ControlPlaneView {
             this._field("TYPE", result.application.type);
             this._field("STATE", result.application.available === false ? "UNAVAILABLE" : "AVAILABLE");
             this.controls.append(this._button("BACK", () => this.request("APPLICATION_LIST")));
+            return;
+        }
+        if (result.kind === "repository-clone" && result.repository && result.repository.project) {
+            this.refreshRepositories();
+            this.setSelectedRepository(result.repository.id, result.repository);
+            this._renderProject(result.repository.project);
+            this._line("CLONE COMPLETE / PROJECT INSPECTED / NO CODE EXECUTED");
             return;
         }
         if (result.kind === "repository-info" && result.repository) {
@@ -290,6 +336,40 @@ class ControlPlaneView {
         }
     }
 
+    _renderProject(project) {
+        this._clear();
+        this._line(project.displayName || "PROJECT //");
+        ["type", "runtime", "manager", "state", "isolation"].forEach(key => this._field(key.toUpperCase(), project[key]));
+        if (project.notice) this._line(project.notice, "warning");
+        (project.profiles || []).forEach(p => this._field("PROFILE", p.displayName));
+        if (project.type === "NODE") this.controls.append(this._button("PREPARE + HOOKS", () => this.request("PROJECT_SETUP_WITH_HOOKS", project.repositoryId)));
+        this.controls.append(this._button("PREPARE", () => this.request("PROJECT_PREPARE", project.repositoryId)),
+            this._button("RUN", () => this.request("PROJECT_RUN", project.repositoryId)),
+            this._button("STOP", () => this.request("PROJECT_STOP", project.repositoryId)),
+            this._button("CODE", () => this.request("REPOSITORY_CODE", project.repositoryId)),
+            this._button("INFO", () => this.request("PROJECT_INSPECT", project.repositoryId)));
+    }
+
+    _renderAutomation(result) {
+        this._clear();
+        this.latestAutomation = result;
+        this.operationId = result.operation.id;
+        this._line(result.status, result.ok ? "muted" : "error");
+        result.operation.steps.forEach((step, index) => this._field(`${index + 1}. ${step.type.replace(/_/g, " ")}`, step.state));
+        if (result.operation.state === "RUNNING") this.controls.append(this._button("CANCEL", () => this.bridge.automation.cancel(result.operation.id)));
+        this.controls.append(this._button("VIEW LOG", async () => {
+            const log = await this.bridge.automation.log(result.operation.id);
+            this.operationId = null;
+            this._clear();
+            this._line("REPOSITORY EXECUTION OUTPUT / LAST 65536 CHARACTERS");
+            const output = this.document.createElement("pre");
+            output.textContent = log.output || "NO OUTPUT";
+            this.output.appendChild(output);
+            this.controls.append(this._button("STATUS", async () => this._renderAutomation(await this.bridge.automation.status(result.operation.id))));
+        }));
+        if (result.operation.state !== "RUNNING") this.controls.append(this._button("PROJECT", () => this.request("PROJECT_INSPECT", result.operation.repositoryId)));
+    }
+
     _renderPlan(result) {
         const plan = result.plan;
         this._line(result.status || "ACTION PLAN", result.confirmationRequired ? "warning" : "error");
@@ -308,7 +388,7 @@ class ControlPlaneView {
             return;
         }
         this.controls.append(
-            this._button("EXECUTE", async () => {
+            this._button("AUTHORIZE", async () => {
                 if (this.pending) return;
                 this.pending = true;
                 this._setBusy(true);
@@ -421,6 +501,12 @@ class ControlPlaneView {
             } else if (catalogEntry && catalogEntry.available) actions.append(this._button("INSTALL", () => this.request("APPLICATION_INSTALL", id)));
             row.append(label, actions);
             this.output.appendChild(row);
+        });
+        this.controls.append(this._button("DISCOVER NEW", () => this.request("APPLICATION_SCAN")));
+        (result.discovered || []).forEach(app => {
+            this._line(`NEW APPLICATION DETECTED // ${app.displayName} // ${app.status}`, "warning");
+            this.output.append(this._button("ADD TO NOMAD", () => this.request("APPLICATION_REGISTER", app.id)),
+                this._button("IGNORE", () => this.request("APPLICATION_IGNORE", app.id)));
         });
         if (!ids.length) this._line("NO APPLICATIONS AVAILABLE", "muted");
     }

@@ -59,9 +59,18 @@ class DeterministicIntentParser {
             return {kind: "ACTION", actionId: "SECURITY_VERIFY"};
         }
 
+        if (["que programas nuevos hay", "what new applications are there"].includes(text)) return {kind: "ACTION", actionId: "APPLICATION_DISCOVERY_LIST"};
+        if (["actualiza la lista de programas", "refresh application list", "scan applications"].includes(text)) return {kind: "ACTION", actionId: "APPLICATION_SCAN"};
+        if (["lista proyectos", "list projects"].includes(text)) return {kind: "ACTION", actionId: "PROJECT_LIST"};
+        const registration = /^(?:anade|add) ([a-z0-9][a-z0-9._-]{0,63}) (?:a|to) nomad$/.exec(text);
+        if (registration) return {kind: "ACTION", actionId: "APPLICATION_REGISTER", targetId: registration[1]};
         const repositoryActions = [
-            {actionId: "REPOSITORY_RUN", phrases: ["corre este repo", "ejecuta este repo", "run this repo"]},
-            {actionId: "REPOSITORY_STOP", phrases: ["para este repo", "deten este repo", "stop this repo"]},
+            {actionId: "PROJECT_PREPARE", phrases: ["prepara este repo", "configura este repo", "prepare this repo"]},
+            {actionId: "PROJECT_SETUP", phrases: ["instala las dependencias", "install dependencies"]},
+            {actionId: "PROJECT_INSPECT", phrases: ["que necesita este repo", "what does this repo need"]},
+            {actionId: "PROJECT_PULL_RUN", phrases: ["haz pull y ejecutalo", "pull and run this repo"]},
+            {actionId: "PROJECT_RUN", phrases: ["corre este repo", "ejecuta este repo", "run this repo"]},
+            {actionId: "PROJECT_STOP", phrases: ["para este repo", "deten este repo", "stop this repo"]},
             {actionId: "REPOSITORY_CODE", phrases: ["abre este repo en code", "open this repo in code"]},
             {actionId: "REPOSITORY_PULL", phrases: ["haz pull", "actualiza este repo", "pull this repo", "update this repo"]},
             {actionId: "REPOSITORY_INFO", phrases: ["info de este repo", "repository info", "show repository info"]},

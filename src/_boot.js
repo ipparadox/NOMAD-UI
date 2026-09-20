@@ -51,6 +51,7 @@ const url = require("url");
 const fs = require("fs");
 const crypto = require("crypto");
 const os = require("os");
+const {SessionAuthProvider, registerSessionAuth} = require("./classes/sessionAuthProvider.js");
 const which = require("which");
 const {Terminal, normalizeTerminalPort} = require("./classes/terminal.class.js");
 const {
@@ -83,6 +84,8 @@ const {
     handleSecurityStatusRequest
 } = require("./classes/securityService.js");
 const {handleTerminalOperation} = require("./classes/terminalForegroundProcessController.js");
+const {AutomationEngine, OPERATION_ID} = require("./classes/automationEngine.js");
+const {ApplicationAutomationService} = require("./classes/applicationAutomationService.js");
 const {ControlPlaneService, validateControlRequest} = require("./classes/controlPlaneService.js");
 const {RendererSystemService} = require("./classes/rendererSystemService.js");
 const {RendererTelemetryService} = require("./classes/rendererTelemetryService.js");
@@ -130,6 +133,7 @@ var repositoryIsolationService, securityProfileService, securityService, securit
 var securityFirewallService, securityPathPolicyService, securityStoragePolicyService, automountPolicyController;
 var applicationPolicyService, runtimePathPolicy;
 var controlPlaneService, rendererSystemService, rendererTelemetryService, applicationControlService, installService;
+var automationEngine, applicationAutomation;
 let themeOverride = null;
 let kbOverride = null;
 let rendererPreloadIsolated = false;
@@ -488,7 +492,7 @@ function createWindow(settings) {
         fullscreen: settings.forceFullscreen || false,
         autoHideMenuBar: true,
         frame: settings.allowWindowed || false,
-        backgroundColor: '#000000',
+        backgroundColor: productionMode ? '#050505' : '#000000',
         webPreferences: {
             preload: path.join(__dirname, "preload.js"),
             devTools: !productionMode,
@@ -549,11 +553,12 @@ function createWindow(settings) {
             logNomadEvent("info", "Production renderer isolation runtime verification passed; renderer status is secure and isolated");
         }
     });
+    if (productionMode) win.once("ready-to-show", () => win.show());
     win.loadURL(rendererUrl);
     if (!productionMode) require("@electron/remote/main").enable(win.webContents);
 
     signale.complete("Frontend window created!");
-    win.show();
+    if (!productionMode) win.show();
     win.on("resize", () => win.webContents.send("nomad.window.resize", {}));
     win.on("leave-full-screen", () => win.webContents.send("nomad.window.leave-fullscreen", {}));
     win.on("move", () => win.webContents.send("window-manager-geometry-changed"));
@@ -570,6 +575,8 @@ function createWindow(settings) {
 }
 
 app.on('ready', async () => {
+    registerSessionAuth(ipc, new SessionAuthProvider(), rendererOwnsRequest,
+        () => Boolean(securityService && securityService.debugConfiguration.runtimeVerified));
     applicationPolicyService = new ApplicationPolicyService({
         getSecurityProfile: () => securityProfileService.get().profile,
         getRunningExternalCount: () => i3WindowManager ? i3WindowManager.getExternalProcessObservation() : null
@@ -1024,7 +1031,38 @@ app.on('ready', async () => {
         applicationService: applicationControlService,
         env: managedApplicationEnvironment
     });
+    const automationProgress = result => {
+        if (win && !win.isDestroyed()) win.webContents.send("nomad.automation.state", result);
+    };
+    const applicationsChanged = applications => {
+        i3WindowManager.setApplications(applications);
+        if (win && !win.isDestroyed()) win.webContents.send("nomad.control.applications-changed", {});
+    };
+    automationEngine = new AutomationEngine({
+        repositoryService, processManager: repositoryProcessManager,
+        pathPolicyAllows: profile => profile !== "PUBLIC" || (runtimePathPolicy.profile === "PUBLIC" && runtimePathPolicy.ephemeral && runtimePathPolicy.volatileRuntimeVerified),
+        getSecurityProfile: () => securityProfileService.get().profile,
+        onState: automationProgress
+    });
+    repositoryActions.automation = automationEngine;
+    applicationAutomation = new ApplicationAutomationService({
+        applicationService: applicationControlService, applicationRegistry,
+        getSecurityProfile: () => securityProfileService.get().profile,
+        env: managedApplicationEnvironment, onChanged: applicationsChanged,
+        onProgress: automationProgress
+    });
+    applicationAutomation.start();
+    ["status", "cancel", "log"].forEach(operation => {
+        ipc.handle(`nomad.automation.${operation}`, (event, request) => {
+            if (!rendererOwnsRequest(event.sender) || !request || typeof request !== "object"
+                || Array.isArray(request) || Object.keys(request).length !== 1
+                || typeof request.operationId !== "string" || !OPERATION_ID.test(request.operationId)) return {ok: false, status: "AUTOMATION REQUEST INVALID"};
+            return automationEngine[operation](request.operationId);
+        });
+    });
     controlPlaneService = new ControlPlaneService({
+        automation: automationEngine, applicationAutomation,
+        onProgress: automationProgress,
         securityService,
         profileService: securityProfileService,
         enforcementService: securityEnforcementService,
@@ -1130,6 +1168,8 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', event => {
+    if (applicationAutomation) applicationAutomation.stop();
+    if (automationEngine) automationEngine.shutdown();
     const hasRepositoryProcesses = repositoryProcessManager && repositoryProcessManager.hasActive();
     const hasRepositoryClone = repositoryGitService && repositoryGitService.hasActiveClone();
     if ((hasRepositoryProcesses || hasRepositoryClone) && !repositoryShutdownComplete) {

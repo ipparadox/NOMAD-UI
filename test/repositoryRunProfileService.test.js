@@ -90,8 +90,8 @@ function run() {
         }, {description: "unrelated package metadata"});
         assert.strictEqual(
             service.inspect(repository).candidates.find(profile => profile.profileId === "npm-dev").authorizationState,
-            "APPROVED",
-            "unrelated manifest fields and other profiles must not invalidate the approved profile"
+            "CHANGED",
+            "V0.6.5 fingerprints include the full manifest, including metadata and other scripts"
         );
 
         writeManifest(repositoryPath, {

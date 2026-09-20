@@ -59,7 +59,7 @@ class TrustedActionRegistry {
     execute(actionId, context) {
         const action = this.actions.get(actionId);
         if (!action) return Promise.resolve({ok: false, status: "UNKNOWN TRUSTED ACTION"});
-        return Promise.resolve(action.handler(context || Object.freeze({})));
+        return Promise.resolve().then(() => action.handler(context || Object.freeze({})));
     }
 }
 

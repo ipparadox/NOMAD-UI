@@ -171,7 +171,7 @@ class RepositoryProcessManager {
 
         let log;
         try {
-            log = this._openLog(repository.id);
+            log = this._openLog(repository.id, Boolean(profile.boundedOutput));
         } catch (error) {
             this.isolationService.cleanup(isolation);
             throw error;
@@ -182,7 +182,7 @@ class RepositoryProcessManager {
             shell: false,
             detached: this.platform !== "win32",
             windowsHide: true,
-            stdio: ["ignore", log.descriptor, log.descriptor]
+            stdio: profile.boundedOutput ? ["ignore", "pipe", "pipe"] : ["ignore", log.descriptor, log.descriptor]
         };
 
         let child;
@@ -194,16 +194,31 @@ class RepositoryProcessManager {
             this.isolationService.cleanup(isolation);
             throw error instanceof RepositoryProcessError ? error : new RepositoryProcessError("REPOSITORY RUN FAILED");
         }
-        this._closeDescriptor(log.descriptor);
+        if (!profile.boundedOutput) this._closeDescriptor(log.descriptor);
         if (!child || !Number.isSafeInteger(child.pid) || child.pid <= 0
             || typeof child.once !== "function") {
             if (child && typeof child.once === "function") {
                 child.once("error", () => this.log("warn", "REPOSITORY RUN PROCESS START FAILED"));
             }
+            if (profile.boundedOutput) this._closeDescriptor(log.descriptor);
             this.isolationService.cleanup(isolation);
             throw new RepositoryProcessError("REPOSITORY RUN FAILED");
         }
 
+        if (typeof profile.boundedOutput === "function") {
+            let remaining = 65536;
+            let closed = false;
+            child.once("close", () => { closed = true; this._closeDescriptor(log.descriptor); });
+            [child.stdout, child.stderr].forEach(stream => {
+                if (stream) stream.on("data", chunk => {
+                    profile.boundedOutput(chunk);
+                    if (closed || remaining <= 0) return;
+                    const bounded = chunk.subarray(0, remaining);
+                    try { this.fs.writeSync(log.descriptor, bounded); remaining -= bounded.length; }
+                    catch (_) { remaining = 0; }
+                });
+            });
+        }
         const record = {
             repositoryId: repository.id,
             repositoryIdentity: repository.repositoryIdentity || null,
@@ -437,12 +452,12 @@ class RepositoryProcessManager {
         }
     }
 
-    _openLog(repositoryId) {
+    _openLog(repositoryId, setup = false) {
         if (!REPOSITORY_ID_PATTERN.test(repositoryId || "") || !this.path.isAbsolute(this.stateRoot)) {
             throw new RepositoryProcessError("RUN LOG UNAVAILABLE");
         }
         const repositoryDirectory = this.path.join(this.stateRoot, repositoryId);
-        const logPath = this.path.join(repositoryDirectory, "run.log");
+        const logPath = this.path.join(repositoryDirectory, setup ? "setup.log" : "run.log");
         if (this.path.dirname(repositoryDirectory) !== this.stateRoot || this.path.dirname(logPath) !== repositoryDirectory) {
             throw new RepositoryProcessError("RUN LOG UNAVAILABLE");
         }
@@ -481,6 +496,7 @@ class RepositoryProcessManager {
                 throw new Error("run log changed while opening");
             }
             this.fs.fchmodSync(descriptor, 0o600);
+            if (setup) this.fs.ftruncateSync(descriptor, 0);
             const result = {descriptor, path: logPath};
             descriptor = undefined;
             return result;

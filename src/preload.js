@@ -75,6 +75,10 @@ function systemRequest(method, targetId) {
 }
 
 const api = {
+    auth: Object.freeze({
+        getSession: () => ipcRenderer.invoke("nomad.auth.session.get", {}),
+        confirmSession: () => ipcRenderer.invoke("nomad.auth.session.confirm", {})
+    }),
     applications: Object.freeze({
         request(operation) {
             if (!APP_OPERATION_SET.has(operation)) return Promise.resolve({ok: false, status: "INVALID REQUEST", applications: []});
@@ -182,6 +186,21 @@ const api = {
             return ipcRenderer.invoke("nomad.control.context", context);
         },
         onApplicationsChanged(callback) { return on("nomad.control.applications-changed", callback); }
+    }),
+    automation: Object.freeze({
+        status(operationId) {
+            if (typeof operationId !== "string" || !/^automation_[a-f0-9]{32}$/.test(operationId)) return Promise.resolve({ok: false, status: "AUTOMATION ID INVALID"});
+            return ipcRenderer.invoke("nomad.automation.status", {operationId});
+        },
+        cancel(operationId) {
+            if (typeof operationId !== "string" || !/^automation_[a-f0-9]{32}$/.test(operationId)) return Promise.resolve({ok: false, status: "AUTOMATION ID INVALID"});
+            return ipcRenderer.invoke("nomad.automation.cancel", {operationId});
+        },
+        log(operationId) {
+            if (typeof operationId !== "string" || !/^automation_[a-f0-9]{32}$/.test(operationId)) return Promise.resolve({ok: false, status: "AUTOMATION ID INVALID"});
+            return ipcRenderer.invoke("nomad.automation.log", {operationId});
+        },
+        onState(callback) { return on("nomad.automation.state", callback); }
     }),
     assistant: Object.freeze({
         interpret(input) {

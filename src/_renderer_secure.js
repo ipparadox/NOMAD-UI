@@ -10,6 +10,7 @@ const secureFailureReferences = Object.freeze({
 });
 
 function renderSecureBootstrapFailure(stage) {
+    if (window.nomadLogin) window.nomadLogin.fatal();
     const safeStage = Object.prototype.hasOwnProperty.call(secureFailureReferences, stage) ? stage : "UI";
     let screen = document.getElementById("boot_screen");
     if (!screen) {
@@ -60,6 +61,9 @@ function reportSecureBootstrapFailure(stage, error) {
         reportSecureBootstrapFailure("PRELOAD", new Error("preload bridge unavailable"));
         return;
     }
+    window.nomadLogin = new LoginExperience(bootScreen, bridge.auth);
+    const login = window.nomadLogin;
+    await login.initialize();
     secureBootstrapStage = "BRIDGE";
     const bootstrap = await bridge.runtime.bootstrap();
     if (!bootstrap || !bootstrap.settings || !bootstrap.theme || !bootstrap.keyboardLayout) {
@@ -140,37 +144,14 @@ function reportSecureBootstrapFailure(stage, error) {
         bridge.log("error", String(reason).slice(0, 512));
     });
 
-    bootScreen.classList.remove("nomad_secure_boot_screen");
-    bootScreen.replaceChildren();
+    const profile = await bridge.security.profile();
+    login.signal("profile", profile && profile.ok ? profile.profile : "UNKNOWN");
+    await login.confirmed;
+    login.transition("SESSION_INITIALIZING");
+    login.status.textContent = "SESSION CONFIRMED // INITIALIZING WORKSTATION";
 
-    if (!bootstrap.settings.nointro && !bootstrap.argv.nointro) {
-        const lines = String(bootstrap.bootLog || "NOMAD BOOT\nBoot Complete").split(/\r?\n/).slice(0, 96);
-        for (const line of lines) {
-            const row = document.createElement("div");
-            row.textContent = line;
-            bootScreen.appendChild(row);
-            await new Promise(resolve => setTimeout(resolve, 8));
-        }
-        await new Promise(resolve => setTimeout(resolve, 120));
-        bootScreen.replaceChildren();
-        bootScreen.className = "center";
-        const title = document.createElement("h1");
-        title.textContent = "NOMAD-UI";
-        bootScreen.appendChild(title);
-        window.audioManager.theme.play();
-        await new Promise(resolve => setTimeout(resolve, 200));
-        title.style.border = `5px solid rgb(${theme.r},${theme.g},${theme.b})`;
-        await new Promise(resolve => setTimeout(resolve, 300));
-        title.style.border = "";
-        title.className = "glitch";
-        await new Promise(resolve => setTimeout(resolve, 500));
-        title.className = "";
-        title.textContent = bootstrap.displayName ? `Welcome back, ${bootstrap.displayName}` : "Welcome back";
-        await new Promise(resolve => setTimeout(resolve, 700));
-    }
-
-    document.body.className = bootstrap.settings.virtualKeyboard ? "" : "no-virtual-keyboard";
-    document.body.innerHTML = `
+    document.body.className = "nomad-login-active " + (bootstrap.settings.virtualKeyboard ? "" : "no-virtual-keyboard");
+    document.body.insertAdjacentHTML("beforeend", `
         <section class="mod_column" id="mod_column_left">
             <h3 class="title"><p>PANEL</p><p>SYSTEM</p></h3>
         </section>
@@ -195,7 +176,7 @@ function reportSecureBootstrapFailure(stage, error) {
         </section>
         <section id="repository"><h3 class="title"><p>REPOSITORIES</p><p><button id="repository_add" type="button">+ REPOSITORY</button></p></h3><div id="repository_container"></div></section>
         <section id="keyboard"></section>
-    `;
+    `);
 
     const text = (id, value) => {
         const element = document.getElementById(id);
@@ -223,7 +204,7 @@ function reportSecureBootstrapFailure(stage, error) {
     const addWorkspaceSlot = document.getElementById("workspace_slot_add");
     let controlPlane = null;
     function focusActiveTerminal() {
-        if (window.nomadInputCapture && window.nomadInputCapture.active) return false;
+        if (login.state !== "NOMAD_READY" || (window.nomadInputCapture && window.nomadInputCapture.active)) return false;
         const client = window.term && window.term[window.currentTerm];
         if (!client || !client.term || typeof client.term.focus !== "function") return false;
         client.term.focus();
@@ -351,6 +332,7 @@ function reportSecureBootstrapFailure(stage, error) {
     };
     await window.term[0].ready;
     document.body.dataset.nomadTerminal = "INITIALIZED";
+    login.signal("terminal", "READY");
     bridge.log("info", "Terminal initialized");
 
     secureBootstrapStage = "UI";
@@ -382,6 +364,7 @@ function reportSecureBootstrapFailure(stage, error) {
         focusTerminal: focusActiveTerminal,
         onchange: active => document.body.classList.toggle("nomad-input-active", active)
     });
+    window.nomadInputCapture.acquire("nomad-login");
     window.addEventListener("mouseup", () => window.nomadInputCapture.handleMouseup());
 
     bridge.terminal.onForegroundState(state => {
@@ -503,6 +486,7 @@ function reportSecureBootstrapFailure(stage, error) {
     });
     window.repositoryLauncher = repositoryLauncher;
     const repositoriesAvailable = await repositoryLauncher.render();
+    login.signal("repositories", repositoriesAvailable ? "READY" : "UNAVAILABLE");
     document.getElementById("repository").style.opacity = "1";
     document.body.dataset.nomadRepositories = repositoriesAvailable ? "INITIALIZED" : "UNAVAILABLE";
     bridge.log(repositoriesAvailable ? "info" : "warn", repositoriesAvailable
@@ -519,7 +503,16 @@ function reportSecureBootstrapFailure(stage, error) {
         window.workspaceManager.setApplications(state.applications);
         return true;
     };
-    bridge.control.onApplicationsChanged(() => reloadApplications());
+    bridge.control.onApplicationsChanged(async () => {
+        await reloadApplications();
+        const discovered = await bridge.control.request("APPLICATION_DISCOVERY_LIST").catch(() => null);
+        const trigger = document.getElementById("nomad_applications_trigger");
+        if (trigger && discovered && discovered.ok) {
+            const count = discovered.applications.length;
+            trigger.textContent = count ? `APPS +${count}` : "APPS";
+            trigger.title = count ? "NEW APPLICATION DETECTED / ADD TO NOMAD OR IGNORE" : "APPLICATIONS";
+        }
+    });
     const activateApplication = id => {
         if (id === "terminal") {
             window.workspaceManager.focus("terminal");
@@ -732,6 +725,12 @@ function reportSecureBootstrapFailure(stage, error) {
     if (!telemetryState.network.available) bridge.log("warn", "Network telemetry unavailable");
     bridge.log(telemetryState.network.globeInitialized ? "info" : "warn",
         telemetryState.network.globeInitialized ? "Globe initialized" : "Globe unavailable");
+    const controlStatus = await bridge.control.setContext({});
+    login.signal("control", controlStatus && controlStatus.ok ? "READY" : "UNKNOWN");
+    login.signal("telemetry", `${telemetryState.system.available ? "LIVE" : "UNAVAILABLE"} / ${telemetryState.network.available ? "LIVE" : "UNAVAILABLE"}`);
+    await login.reveal();
+    window.nomadInputCapture.release("nomad-login");
+    focusActiveTerminal();
     bridge.runtime.windowAction("focus");
     secureBootstrapStage = "READY";
     document.body.dataset.nomadRendererReady = "true";

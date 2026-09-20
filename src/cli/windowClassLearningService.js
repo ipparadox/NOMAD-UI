@@ -440,6 +440,7 @@ class WindowClassLearningService {
     constructor(opts = {}) {
         if (!opts.applicationService) throw new TypeError("Window class learning requires an ApplicationService");
         this.applicationService = opts.applicationService;
+        this.authorize = opts.authorize || (() => true);
         this.env = opts.env || process.env;
         this.path = opts.path || path;
         this.spawn = opts.learningSpawn || childProcess.spawn;
@@ -467,6 +468,7 @@ class WindowClassLearningService {
             throw new CliError("WINDOW CLASS LEARNING OPTIONS INVALID", 2);
         }
         const timeoutMs = validateLearningTimeoutMs(opts.timeoutMs, this.defaultTimeoutMs);
+        if (!this.authorize()) throw new CliError("WINDOW CLASS LEARNING BLOCKED BY SECURITY PROFILE");
         const target = this.applicationService.prepareWindowClassLearning(identifier);
         if (typeof this.env.I3SOCK !== "string" || !this.env.I3SOCK.trim()) {
             throw new CliError("NOMAD SESSION REQUIRED FOR WINDOW CLASS LEARNING\nREGISTRY NOT CHANGED");
@@ -479,6 +481,7 @@ class WindowClassLearningService {
             throw new CliError("NOMAD SESSION REQUIRED FOR WINDOW CLASS LEARNING\nI3 WINDOW TREE NOT AVAILABLE\nREGISTRY NOT CHANGED");
         }
         const beforeKeys = new Set(snapshotI3Clients(beforeTree).keys());
+        if (!this.authorize()) throw new CliError("WINDOW CLASS LEARNING BLOCKED BY SECURITY PROFILE");
         const launch = await this._launch(target);
         safeLog(this.log, "info", `WM_CLASS LEARNING START: application=${sanitizeDiagnosticValue(target.id)}`);
         const candidates = await this._observeNewWindows(beforeKeys, launch, timeoutMs);
@@ -487,6 +490,7 @@ class WindowClassLearningService {
             processCorrelator: this.processCorrelator,
             log: this.log
         });
+        if (!this.authorize()) throw new CliError("WINDOW CLASS REGISTRATION BLOCKED BY SECURITY PROFILE");
         const stored = this.applicationService.storeLearnedWindowMatcher(target, {
             className: selected.className,
             instance: selected.instance

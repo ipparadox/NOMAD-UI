@@ -187,7 +187,7 @@ async function run() {
             operation: "action", repositoryId: repository.id, actionId: "run"
         });
         assert.strictEqual(selection.prompt.kind, "profile-selection");
-        assert.deepStrictEqual(selection.prompt.choices.map(choice => choice.label), ["npm run dev", "npm run start", "CANCEL"]);
+        assert.deepStrictEqual(selection.prompt.choices.map(choice => choice.label), ["NPM DEV", "NPM START", "CANCEL"]);
         assert.strictEqual(processManager.starts.length, 0, "detecting package.json candidates must not execute them");
 
         const confirmation = await handleRepositoryRequest(actions, {
@@ -196,8 +196,7 @@ async function run() {
         assert.strictEqual(confirmation.prompt.kind, "authorization");
         assert.deepStrictEqual(confirmation.prompt.fields, [
             {label: "PROFILE", value: "NPM DEV"},
-            {label: "EXECUTABLE", value: "npm"},
-            {label: "ARGUMENTS", value: "run dev"},
+            {label: "EXECUTION", value: "PREDEFINED MAIN-SIDE PROFILE"},
             {label: "SECURITY", value: "NORMAL"},
             {label: "ISOLATION", value: "NONE"}
         ]);

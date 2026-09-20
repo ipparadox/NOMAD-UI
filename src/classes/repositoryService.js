@@ -537,6 +537,7 @@ class RepositoryActionService {
         if (internal && this.gitService.isUpdating(repository.id)) {
             pullCapability = {ok: false, state: "UPDATING"};
         } else if (internal && !processActive) pullCapability = await this.gitService.inspectUpdate(internal);
+        if (internal && this.automation) publicRepository.project = this.automation.project(internal);
         publicRepository.process = processStatus;
         publicRepository.executionSecurity = executionSecurity;
         publicRepository.actions = Array.from(this.actions.values()).map(action => {
@@ -623,6 +624,7 @@ class RepositoryActionService {
     }
 
     async _run(context) {
+        if (this.automation && this.automation.active(context.repository.id)) return {ok: false, status: "PROJECT SETUP RUNNING"};
         const repository = context.repository;
         const request = context.runRequest || {};
         if (this.processManager.isActive(repository.id)) {
@@ -690,6 +692,7 @@ class RepositoryActionService {
         }
         const executionSecurity = this._executionSecurity();
         if (!executionSecurity.allowed) return {ok: false, status: executionSecurity.status};
+        if (pending.securityProfile !== executionSecurity.securityProfile) return {ok: false, status: "SECURITY PROFILE CHANGED / AUTHORIZATION REQUIRED"};
         if (request.authorization === "trust-profile") this.runProfileService.approve(repository, candidate);
         else if (request.authorization !== "run-once") return {ok: false, status: "INVALID REQUEST"};
         return this._launch(repository, candidate);
@@ -707,6 +710,8 @@ class RepositoryActionService {
     }
 
     async _stop(context) {
+        const setup = this.automation && this.automation.active(context.repositoryId);
+        if (setup) return this.automation.cancel(setup.id);
         const repositoryIdValue = context.repositoryId || (context.repository && context.repository.id);
         const snapshot = this.processManager.getRepositorySnapshot(repositoryIdValue);
         const result = await this.processManager.stop(repositoryIdValue);
@@ -722,6 +727,7 @@ class RepositoryActionService {
     }
 
     async _pull(context) {
+        if (this.automation && this.automation.active(context.repository.id)) return {ok: false, status: "PROJECT SETUP RUNNING"};
         const repository = context.repository;
         if (this.processManager.isActive(repository.id)) {
             return {ok: false, status: "REPOSITORY PROCESS ACTIVE\nUPDATE ABORTED"};
@@ -763,6 +769,7 @@ class RepositoryActionService {
             executionIdentity: repository.executionIdentity,
             repositoryIdentity: repository.repositoryIdentity,
             profileFingerprint: candidate.profileFingerprint,
+            securityProfile: this._executionSecurity().securityProfile,
             expiresAt: this.nowMilliseconds() + this.authorizationTtlMs
         });
         while (this.pendingAuthorizations.size > 128) {
@@ -778,8 +785,7 @@ class RepositoryActionService {
             authorizationId,
             fields: [
                 {label: "PROFILE", value: candidate.displayName},
-                {label: "EXECUTABLE", value: candidate.executable},
-                {label: "ARGUMENTS", value: candidate.args.join(" ") || "NONE"},
+                {label: "EXECUTION", value: "PREDEFINED MAIN-SIDE PROFILE"},
                 {label: "SECURITY", value: executionSecurity.securityProfile},
                 {label: "ISOLATION", value: executionSecurity.level}
             ],

@@ -1,4 +1,5 @@
 const childProcess = require("child_process");
+const {buildRepositoryRunEnvironment} = require("../classes/repositoryIsolationService.js");
 const fs = require("fs");
 const path = require("path");
 const {CliError} = require("./errors.js");
@@ -88,6 +89,7 @@ class InstallService {
             try {
                 child = this.spawn(plan.executable, plan.args.slice(), {
                     stdio: "inherit",
+                    env: buildRepositoryRunEnvironment(this.env, {PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}),
                     shell: false
                 });
             } catch (error) {

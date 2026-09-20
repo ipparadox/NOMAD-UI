@@ -318,72 +318,13 @@ class RepositoryRunProfileService {
             || typeof repository.canonicalPath !== "string" || !this.path.isAbsolute(repository.canonicalPath)) {
             return [];
         }
-        const candidates = [];
-        const packageContent = this._readTopLevelFile(repository.canonicalPath, "package.json", MAX_PACKAGE_JSON_BYTES);
-        if (packageContent !== null) {
-            let manifest;
-            try {
-                manifest = JSON.parse(packageContent);
-            } catch (error) {
-                manifest = null;
-            }
-            const scripts = isPlainObject(manifest) && isPlainObject(manifest.scripts) ? manifest.scripts : null;
-            if (scripts) {
-                ["dev", "start", "serve"].forEach(scriptName => {
-                    if (!Object.prototype.hasOwnProperty.call(scripts, scriptName)) return;
-                    const script = scripts[scriptName];
-                    if (typeof script !== "string" || !script.trim() || script.length > 65536) return;
-                    const lifecycle = {};
-                    [`pre${scriptName}`, scriptName, `post${scriptName}`].forEach(name => {
-                        if (Object.prototype.hasOwnProperty.call(scripts, name) && typeof scripts[name] === "string") {
-                            lifecycle[name] = scripts[name];
-                        }
-                    });
-                    candidates.push(this._candidate({
-                        profileId: `npm-${scriptName}`,
-                        displayName: `NPM ${scriptName.toUpperCase()}`,
-                        commandLabel: `npm run ${scriptName}`,
-                        executable: "npm",
-                        args: ["run", scriptName],
-                        source: {kind: "package-json-script", reference: scriptName},
-                        sourceDefinition: {kind: "package-json-script", scriptName, lifecycle}
-                    }));
-                });
-            }
-        }
-
-        const cargoManifest = this._readTopLevelFile(repository.canonicalPath, "Cargo.toml", MAX_CARGO_MANIFEST_BYTES);
-        if (cargoManifest !== null) {
-            const cargoLock = this._readTopLevelFile(repository.canonicalPath, "Cargo.lock", MAX_CARGO_LOCK_BYTES);
-            candidates.push(this._candidate({
-                profileId: "cargo-run",
-                displayName: "CARGO RUN",
-                commandLabel: "cargo run",
-                executable: "cargo",
-                args: ["run"],
-                source: {kind: "cargo-manifest", reference: "Cargo.toml"},
-                sourceDefinition: {
-                    kind: "cargo-manifest",
-                    manifestFingerprint: fingerprint(cargoManifest),
-                    lockFingerprint: cargoLock === null ? "ABSENT" : fingerprint(cargoLock),
-                    fixedProfile: "cargo-run"
-                }
+        try {
+            const {discoverRunProfiles} = require("./projectAdapters.js");
+            return discoverRunProfiles(repository, this.fs).map(profile => this._candidate({
+                ...profile, commandLabel: profile.displayName,
+                sourceDefinition: {adapterFingerprint: profile.fingerprint, profileId: profile.profileId}
             }));
-        }
-
-        [["main.py", "python-main", "PYTHON MAIN"], ["app.py", "python-app", "PYTHON APP"]].forEach(spec => {
-            if (!this._isSafeTopLevelFile(repository.canonicalPath, spec[0])) return;
-            candidates.push(this._candidate({
-                profileId: spec[1],
-                displayName: spec[2],
-                commandLabel: `python3 ${spec[0]}`,
-                executable: "python3",
-                args: [spec[0]],
-                source: {kind: "python-entrypoint", reference: spec[0]},
-                sourceDefinition: {kind: "python-entrypoint", relativePath: spec[0]}
-            }));
-        });
-        return candidates;
+        } catch (error) { return []; }
     }
 
     inspect(repository) {
@@ -436,8 +377,6 @@ class RepositoryRunProfileService {
             profileId: candidate.profileId,
             displayName: candidate.displayName,
             commandLabel: candidate.commandLabel,
-            executable: candidate.executable,
-            args: candidate.args.slice(),
             port: candidate.port,
             browserBehavior: candidate.browserBehavior,
             authorizationState: candidate.authorizationState || "UNAPPROVED"

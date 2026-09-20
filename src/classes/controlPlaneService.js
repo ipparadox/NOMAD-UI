@@ -49,6 +49,9 @@ class ControlPlaneService {
         this.applicationRegistry = opts.applicationRegistry;
         this.applicationPolicy = opts.applicationPolicy;
         this.windowManager = opts.windowManager;
+        this.automation = opts.automation || null;
+        this.applicationAutomation = opts.applicationAutomation || null;
+        this.onProgress = opts.onProgress || (() => {});
         this.installService = opts.installService || null;
         this.applicationService = opts.applicationService || null;
         this.packageCatalog = Array.isArray(opts.packageCatalog) ? opts.packageCatalog.slice() : [];
@@ -140,12 +143,13 @@ class ControlPlaneService {
         const challenge = this.challenges.get(request.challengeId);
         this.challenges.delete(request.challengeId);
         if (!challenge || challenge.expiresAt <= this.nowMilliseconds()) return {ok: false, status: "CONFIRMATION EXPIRED"};
+        if (challenge.securityProfile !== this._selectedProfile()) return {ok: false, status: "PROFILE CHANGED / REAUTHORIZE"};
         return this.registry.execute(challenge.actionId, {
             phase: "EXECUTE",
             targetId: challenge.targetId,
             stored: challenge.stored,
             context: clone(this.context)
-        });
+        }).catch(() => ({ok: false, status: "TRUSTED ACTION REFUSED"}));
     }
 
     cancel(request) {
@@ -164,7 +168,7 @@ class ControlPlaneService {
                 ? "NO REPOSITORY SELECTED" : "TRUSTED ACTION TARGET INVALID"};
         }
         const context = {phase: "REQUEST", targetId, source, context: clone(this.context)};
-        const result = await this.registry.execute(actionId, context);
+        const result = await this.registry.execute(actionId, context).catch(() => ({ok: false, status: "TRUSTED ACTION REFUSED"}));
         if (!result || typeof result !== "object") return {ok: false, status: "TRUSTED ACTION FAILED"};
         if (result.confirmation) return this._challenge(actionId, targetId, definition, result.confirmation, result.stored);
         return result;
@@ -184,6 +188,7 @@ class ControlPlaneService {
             actionId,
             targetId,
             stored: stored ? clone(stored) : null,
+            securityProfile: this._selectedProfile(),
             expiresAt: this.nowMilliseconds() + this.challengeTtlMs
         });
         while (this.challenges.size > MAX_CHALLENGES) this.challenges.delete(this.challenges.keys().next().value);
@@ -245,6 +250,38 @@ class ControlPlaneService {
             context => this._applicationInstall(context));
         register("APPLICATION_REMOVE", "REMOVE APPLICATION", "PERSISTENT", "APPLICATION", "USER", ["REMOVE USER REGISTRY ENTRY ONLY", "DO NOT UNINSTALL SYSTEM PACKAGE"],
             context => this._applicationRemove(context));
+
+        register("PROJECT_LIST", "PROJECTS", "READ_ONLY", "NONE", "NONE", ["READ PROJECT PROJECTION"],
+            () => this.automation ? this.automation.list() : {ok: false, status: "AUTOMATION UNAVAILABLE"});
+        register("PROJECT_INSPECT", "INSPECT PROJECT", "READ_ONLY", "REPOSITORY", "NONE", ["PARSE PROJECT METADATA ONLY"],
+            c => this.automation ? this.automation.inspect(c.targetId) : {ok: false, status: "AUTOMATION UNAVAILABLE"});
+        ["PROJECT_PREPARE", "PROJECT_SETUP", "PROJECT_SETUP_WITH_HOOKS"].forEach(id => register(id, "PREPARE PROJECT", "PERSISTENT", "REPOSITORY", "NONE", ["AUTHORIZED ISOLATED DEPENDENCY SETUP"],
+            c => this.automation ? c.phase === "EXECUTE" ? this.automation.authorize(c.stored.automationPlan) : this.automation.plan(c.targetId, id === "PROJECT_SETUP_WITH_HOOKS") : {ok: false, status: "AUTOMATION UNAVAILABLE"}));
+        register("PROJECT_RUN", "RUN PROJECT", "LOW", "REPOSITORY", "NONE", ["PRESERVE RUN AUTHORIZATION"], c => this._repositoryRun(c));
+        register("PROJECT_STOP", "STOP PROJECT", "LOW", "REPOSITORY", "NONE", ["STOP TRACKED PROJECT ONLY"], async c => {
+            const active = this.automation && this.automation.active(c.targetId);
+            return active ? this.automation.cancel(active.id) : this._repositoryAction(c.targetId, "stop");
+        });
+        register("PROJECT_PULL_RUN", "PULL THEN RUN PROJECT", "PERSISTENT", "REPOSITORY", "NONE", ["PULL", "REINSPECT", "REQUEST RUN AUTHORIZATION"], async c => {
+            if (c.phase !== "EXECUTE") {
+                const plan = await this._repositoryPersistent(c, "pull");
+                if (plan.confirmation) {
+                    plan.confirmation.request = "PULL THEN RUN PROJECT";
+                    plan.confirmation.effects.push("REINSPECT EXECUTION FINGERPRINT", "RUN WITH EXISTING VALID TRUST OR REQUEST FRESH RUN AUTHORIZATION");
+                }
+                return plan;
+            }
+            const pulled = await this._repositoryAction(c.targetId, "pull");
+            if (!pulled.ok) return pulled;
+            if (this.automation) await this.automation.inspect(c.targetId);
+            return this._repositoryRun({targetId: c.targetId, phase: "REQUEST"});
+        });
+        ["APPLICATION_SCAN", "APPLICATION_DISCOVERY_LIST"].forEach(id => register(id, "DISCOVER APPLICATIONS", "READ_ONLY", "NONE", "NONE", ["READ VERIFIED DESKTOP ENTRIES"],
+            () => this.applicationAutomation ? this.applicationAutomation.scan() : {ok: false, status: "DISCOVERY UNAVAILABLE"}));
+        register("APPLICATION_REGISTER", "ADD TO NOMAD", "PERSISTENT", "APPLICATION", "USER", ["VERIFY APPLICATION IDENTITY"],
+            c => this.applicationAutomation ? c.phase === "EXECUTE" ? this.applicationAutomation.register(c.targetId, c.stored) : this.applicationAutomation.plan(c.targetId) : {ok: false, status: "DISCOVERY UNAVAILABLE"});
+        register("APPLICATION_IGNORE", "IGNORE APPLICATION", "LOW", "APPLICATION", "NONE", ["IGNORE FOR THIS SESSION"],
+            c => this.applicationAutomation ? this.applicationAutomation.ignore(c.targetId) : {ok: false, status: "DISCOVERY UNAVAILABLE"});
 
         register("REPOSITORY_RUN", "RUN REPOSITORY", "LOW", "REPOSITORY", "NONE", ["PRESERVE FINGERPRINT AUTHORIZATION", "PRESERVE ISOLATION POLICY"],
             context => this._repositoryRun(context));
@@ -371,7 +408,7 @@ class ControlPlaneService {
             available: definition.sources.some(source => availableSources.has(source.source)),
             sources: definition.sources.map(source => source.source).slice(0, 4)
         }));
-        return {ok: true, kind: "application-list", status: "APPLICATIONS READY", applications: registered, catalog};
+        return {ok: true, kind: "application-list", status: "APPLICATIONS READY", applications: registered, catalog, discovered: this.applicationAutomation ? this.applicationAutomation.scan().applications : []};
     }
 
     _applicationInfo(appId) {
@@ -404,14 +441,25 @@ class ControlPlaneService {
     }
 
     async _applicationInstall(context) {
+        if (!["NORMAL", "PUBLIC"].includes(this._selectedProfile())) return {ok: false, status: "APPLICATION INSTALL BLOCKED BY SECURITY PROFILE"};
         if (!this.installService) return {ok: false, status: "APPLICATION INSTALL SERVICE UNAVAILABLE"};
         if (context.phase === "EXECUTE") {
             try {
+                this.onProgress({kind: "application-stage", status: "INSTALLING TRUSTED PACKAGE", appId: context.targetId});
                 await this.installService.apply(context.stored.installPlan);
-                const registered = this.installService.registerInstalled(context.targetId);
-                this.applicationRegistry.reload();
-                this.onApplicationsChanged(this.applicationRegistry.getApplications());
-                return {ok: true, kind: "application-install", status: "APPLICATION INSTALLED", application: registered && registered.application ? publicApplication(registered.application) : null};
+                if (!["NORMAL", "PUBLIC"].includes(this._selectedProfile())) return {ok: false, status: "INSTALLATION SUCCESS / REGISTRATION BLOCKED BY PROFILE"};
+                this.onProgress({kind: "application-stage", status: "INSTALLATION SUCCESS / DISCOVERING DESKTOP ENTRY", appId: context.targetId});
+                try {
+                    if (this.applicationAutomation) {
+                        const completed = await this.applicationAutomation.installed(context.targetId, this.installService);
+                        return {...completed, status: completed.ok ? "APPLICATION INSTALLED / READY" : "INSTALLATION SUCCESS / " + completed.status};
+                    }
+                    const registered = this.installService.registerInstalled(context.targetId);
+                    this.applicationRegistry.reload();
+                    this.onApplicationsChanged(this.applicationRegistry.getApplications());
+                    return {ok: Boolean(registered && registered.application), kind: "application-install", status: registered && registered.application ? "APPLICATION INSTALLED" : "INSTALLATION SUCCESS / NOMAD REGISTRATION INCOMPLETE", application: registered && registered.application ? publicApplication(registered.application) : null};
+                } catch (_) { return {ok: false, kind: "application-install", status: "INSTALLATION SUCCESS / NOMAD REGISTRATION INCOMPLETE"}; }
+
             } catch (error) {
                 return {ok: false, status: cleanText(error && error.message, "APPLICATION INSTALL FAILED")};
             }

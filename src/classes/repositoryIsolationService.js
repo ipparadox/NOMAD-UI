@@ -249,6 +249,10 @@ class RepositoryIsolationService {
         const evaluation = this.evaluatePolicy(profileId);
         if (!evaluation.allowed) return evaluation;
         this._validateExecutionSpec(spec);
+        if (spec.profile && (spec.profile.executionKind === "SETUP" || (spec.profile.executable === "python3" && spec.profile.args[0] === "-c")) && evaluation.level !== "STRONG") {
+            return this._blocked(profileId, "SETUP REQUIRES VERIFIED BUBBLEWRAP");
+        }
+
         const capabilities = this.capabilities();
         const suitable = capabilities.backends.filter(backend => backend.available
             && levelAtLeast(backend.level, policy.minimumRepositoryIsolation))
@@ -399,7 +403,8 @@ class RepositoryIsolationService {
             backend: backend.id,
             reason: backend.reason,
             executable: bwrap,
-            args: this._bubblewrapArguments(spec.repository.canonicalPath, spec.executable, spec.args, environment),
+            args: this._bubblewrapArguments(spec.repository.canonicalPath, spec.executable, spec.args, environment,
+                !spec.profile || spec.profile.executionKind !== "SETUP" || spec.profile.networkRequired === true),
             cwd: "/",
             env: buildRepositoryRunEnvironment(this.environment),
             controller: null,
@@ -477,9 +482,9 @@ class RepositoryIsolationService {
         };
     }
 
-    _bubblewrapArguments(repositoryPath, executable, args, environment) {
+    _bubblewrapArguments(repositoryPath, executable, args, environment, networkAllowed = true) {
         const output = [
-            "--die-with-parent", "--new-session", "--unshare-all", "--share-net",
+            "--die-with-parent", "--new-session", "--unshare-all", ...(networkAllowed ? ["--share-net"] : []),
             "--tmpfs", "/"
         ];
         ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/run/systemd/resolve"].forEach(target => {

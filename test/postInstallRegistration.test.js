@@ -1,3 +1,5 @@
+// Desktop-entry fixtures must have trusted, non-group-writable ownership modes.
+process.umask(0o077);
 const assert = require("assert");
 const {EventEmitter} = require("events");
 const fs = require("fs");

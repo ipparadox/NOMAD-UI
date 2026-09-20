@@ -28,6 +28,10 @@
         <link rel="stylesheet" href="assets/css/extra_ratios.css" />
         <link rel="stylesheet" href="assets/css/control_plane.css" />
 
+        <link rel="stylesheet" href="assets/css/login.css" />
+        <script src="classes/asciiWaveBackground.class.js"></script>
+        <script src="classes/loginExperience.class.js"></script>
+
         <script src="node_modules/xterm/lib/xterm.js"></script>
         <script src="node_modules/xterm-addon-attach/lib/xterm-addon-attach.js"></script>
         <script src="node_modules/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
@@ -46,15 +50,31 @@
         <script src="classes/secureTelemetry.class.js"></script>
         <script src="classes/controlPlaneView.class.js"></script>
     </head>
-    <body class="solidBackground">
-        <section id="boot_screen" class="nomad_secure_boot_screen">
-            <div id="nomad_secure_bootstrap_status" role="status" aria-live="polite">
-                <h1>NOMAD // SECURE RENDERER</h1>
-                <p><span>STAGE</span><span>DOM</span></p>
-                <p><span>STATUS</span><span>INITIALIZING</span></p>
-                <p><span>REFERENCE</span><span>NMD-DOM-000</span></p>
-                <footer>RETURN TO SAFE SESSION</footer>
+    <body class="solidBackground nomad-login-active">
+        <section id="boot_screen" class="nomad-login" aria-label="NOMAD session confirmation">
+            <canvas id="ascii" aria-hidden="true"></canvas>
+            <div class="nomad-login-shade"></div>
+            <header class="nomad-login-header"><div><div class="nomad-login-label">NODE</div><span data-login-node>UNKNOWN</span></div><div><div class="nomad-login-label">LOCAL TIME</div><time data-login-time>UNKNOWN</time></div></header>
+            <div class="nomad-login-scan" aria-hidden="true"></div>
+            <div class="nomad-login-center">
+                <h1>NOMAD</h1>
+                <div class="nomad-login-subtitle">SECURE FIELD TERMINAL</div>
+                <div class="nomad-login-label">OPERATOR // SESSION CONFIRMATION</div>
+                <div class="nomad-login-identity"><div class="nomad-login-label">OS IDENTITY</div><span data-login-operator>UNKNOWN</span></div>
+                <div data-login-session>INITIALIZING SESSION PROVIDER</div>
+                <p class="nomad-login-notice">Continue into your existing OS session.<br>This confirmation does not lock or re-authenticate the computer.</p>
+                <button type="button" disabled>[ ENTER NOMAD ]</button>
+                <div data-login-status role="status" aria-live="polite">INITIALIZING SECURE RENDERER</div>
             </div>
+            <div class="nomad-login-checks">
+                <div>SECURE RENDERER<span data-login-renderer>UNKNOWN</span></div>
+                <div>SECURITY PROFILE<span data-login-profile>UNKNOWN</span></div>
+                <div>CONTROL PLANE<span data-login-control>UNKNOWN</span></div>
+                <div>TERMINAL<span data-login-terminal>UNKNOWN</span></div>
+                <div>REPOSITORIES<span data-login-repositories>UNKNOWN</span></div>
+                <div>TELEMETRY / NETWORK<span data-login-telemetry>UNKNOWN / UNKNOWN</span></div>
+            </div>
+            <footer class="nomad-login-footer"><span>AUTH CHANNEL // <span data-login-channel>UNKNOWN</span></span><span>LOCAL OPERATOR ACCESS</span></footer>
         </section>
         <script src="_renderer_secure.js"></script>
     </body>

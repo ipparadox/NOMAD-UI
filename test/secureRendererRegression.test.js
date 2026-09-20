@@ -106,9 +106,10 @@ assert(!/\b(?:Worker|SharedWorker)\s*\(|new\s+Blob\s*\(/.test(secureRenderer + s
 
 function executePreload(exposeInMainWorld) {
     const sent = [];
+    const invoked = [];
     let exposed = null;
     const ipcRenderer = {
-        invoke: () => Promise.resolve(null),
+        invoke: (...args) => { invoked.push(args); return Promise.resolve(null); },
         on: () => {},
         removeListener: () => {},
         send: (...args) => sent.push(args),
@@ -133,7 +134,7 @@ function executePreload(exposeInMainWorld) {
         window: {}
     };
     vm.runInNewContext(preload, context, {filename: "preload.js"});
-    return {sent, exposed};
+    return {sent, exposed, invoked};
 }
 
 const preloadRun = executePreload(() => {});
@@ -141,6 +142,19 @@ assert(preloadRun.exposed, "preload must expose the isolated bridge");
 assert.strictEqual(preloadRun.exposed.key, "nomad");
 assert.deepStrictEqual(Object.keys(preloadRun.exposed.api).sort(), Array.from(EXPECTED_BRIDGE_KEYS));
 assert(Object.isFrozen(preloadRun.exposed.api));
+assert.deepStrictEqual(Object.keys(preloadRun.exposed.api.automation).sort(), ["cancel", "log", "onState", "status"]);
+const operationId = `automation_${"a".repeat(32)}`;
+for (const method of ["status", "cancel", "log"]) {
+    preloadRun.exposed.api.automation[method](operationId);
+    const request = preloadRun.invoked[preloadRun.invoked.length - 1];
+    assert.strictEqual(request[0], `nomad.automation.${method}`);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(request[1])), {operationId});
+    const before = preloadRun.invoked.length;
+    preloadRun.exposed.api.automation[method]({operationId, executable: "/bin/sh", args: []});
+    preloadRun.exposed.api.automation[method](1234);
+    assert.strictEqual(preloadRun.invoked.length, before, "automation bridge must reject non-opaque input without invoking main");
+}
+
 assert(!Object.prototype.hasOwnProperty.call(preloadRun.exposed.api, "require"));
 assert(!Object.prototype.hasOwnProperty.call(preloadRun.exposed.api, "process"));
 assert(!Object.prototype.hasOwnProperty.call(preloadRun.exposed.api, "module"));
@@ -156,7 +170,7 @@ const failureContext = {
     require: () => ({
         contextBridge: {exposeInMainWorld: () => { throw new TypeError("bridge exposure failed"); }},
         ipcRenderer: {
-            invoke: () => Promise.resolve(null), on: () => {}, removeListener: () => {}, sendSync: () => null,
+            invoke: (...args) => { invoked.push(args); return Promise.resolve(null); }, on: () => {}, removeListener: () => {}, sendSync: () => null,
             send: (...args) => failureEvents.push(args)
         }
     }),
@@ -184,8 +198,9 @@ assert(preload.includes('const TERMINAL_EVENT_SET = new Set(["Renderer startup",
 assert(boot.includes('case "Renderer startup"') || read("src/classes/terminal.class.js").includes('case "Renderer startup"'));
 assert(boot.includes('signale.success("Connected to frontend!")'));
 
-assert(secureHtml.includes("NOMAD // SECURE RENDERER"));
-assert(secureHtml.includes("RETURN TO SAFE SESSION"));
+assert(secureHtml.includes('class="nomad-login"'));
+assert(!secureHtml.includes("RETURN TO SAFE SESSION"));
+assert(secureRenderer.includes("RETURN TO SAFE SESSION"));
 assert(secureRenderer.includes("NOMAD // SECURE RENDERER FAILURE"));
 assert(secureRenderer.includes("INITIALIZATION FAILED"));
 assert(!/screen\.textContent\s*=.*error.*message/i.test(secureRenderer), "technical failures must not render raw messages");

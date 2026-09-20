@@ -1,0 +1,48 @@
+/* Standalone first-frame styles, independent of the asynchronously loaded theme. */
+body.nomad-login-active { background: #050505; }
+body.nomad-login-active > :not(#boot_screen):not(script) { visibility: hidden !important; pointer-events: none !important; }
+body.nomad-login-active.nomad-revealing > :not(#boot_screen):not(script) { visibility: visible !important; }
+#boot_screen.nomad-login {
+    position: fixed; inset: 0; width: 100%; height: 100%; z-index: 100000;
+    display: block; padding: 0; margin: 0; background: #050505;
+    color: #c9d0d1; font: 12px/1.6 "SF Mono", Menlo, Consolas, "Courier New", monospace;
+    letter-spacing: .12em; text-transform: uppercase; cursor: default !important;
+}
+.nomad-login *, .nomad-login *::before, .nomad-login *::after { box-sizing: border-box; }
+#ascii { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; z-index: 0; }
+.nomad-login-shade { position: absolute; inset: 0; z-index: 1; background: radial-gradient(ellipse 370px 350px at 50% 47%, #050505fa 0%, #050505eb 55%, #05050590 78%, transparent 100%); pointer-events: none; }
+.nomad-login-header, .nomad-login-footer { position: absolute; left: 4vw; right: 4vw; display: flex; justify-content: space-between; align-items: center; gap: 24px; }
+.nomad-login-header { top: 4vh; border-top: 1px solid #7aafb449; padding-top: 14px; }
+.nomad-login-footer { bottom: 4vh; border-bottom: 1px solid #7aafb449; padding-bottom: 14px; font-size: 10px; }
+.nomad-login-label { color: #819094; font-size: 10px; letter-spacing: .2em; }
+.nomad-login-center { position: absolute; left: 50%; top: 48%; width: min(460px, 78vw); transform: translate(-50%, -50%); padding: 26px 34px; animation: nomad-login-enter .65s ease-out both; }
+.nomad-login-center::before, .nomad-login-center::after { content: ""; position: absolute; width: 20px; height: 48px; border-color: #78b0b8; border-style: solid; }
+.nomad-login-center::before { top: 0; left: 0; border-width: 1px 0 0 1px; }
+.nomad-login-center::after { bottom: 0; right: 0; border-width: 0 1px 1px 0; }
+#boot_screen.nomad-login h1 { font: 500 clamp(42px, 5vw, 68px)/1 "SF Mono", Menlo, Consolas, monospace; letter-spacing: .23em; color: #edf0ef; margin: 0 0 18px; padding: 0; border: none; text-align: left; opacity: 1; animation: none; }
+.nomad-login-subtitle { color: #8bb8be; font-size: 11px; letter-spacing: .24em; margin-bottom: 34px; }
+.nomad-login-identity { border-top: 1px solid #77878c66; border-bottom: 1px solid #77878c66; padding: 16px 0; margin: 18px 0; }
+[data-login-operator] { display: block; color: #edf0ef; font-size: 20px; letter-spacing: .08em; text-transform: none; }
+[data-login-session] { color: #a8b798; font-size: 10px; line-height: 1.8; }
+.nomad-login-notice { font-size: 10px; letter-spacing: .02em; color: #8d999c; text-transform: none; margin: 12px 0 24px; }
+#boot_screen.nomad-login button { width: 100%; border: 1px solid #8bb8be80; border-radius: 0; padding: 15px 12px; background: #0a1113e8; color: #d8eaed; font: inherit; letter-spacing: .15em; cursor: pointer; transition: border-color .2s, background .2s, box-shadow .2s; }
+#boot_screen.nomad-login button:focus { outline: 1px solid #b7d8db; outline-offset: 5px; background: #132125; box-shadow: inset 3px 0 #8bb8be; }
+#boot_screen.nomad-login button:disabled { color: #819094; cursor: default; }
+[data-login-status] { margin-top: 18px; min-height: 2em; font-size: 10px; color: #9caaa6; }
+[data-state="AUTH_FAILED"] [data-login-status] { color: #c5a279; }
+[data-state="AUTH_SUCCESS"] [data-login-status], [data-state="SESSION_INITIALIZING"] [data-login-status] { color: #abbf97; }
+.nomad-login-checks { position: absolute; bottom: 12vh; left: 4vw; right: 4vw; display: flex; flex-wrap: wrap; gap: 20px 40px; font-size: 10px; }
+.nomad-login-checks span { display: block; color: #abc2c4; }
+.nomad-login-scan { position: absolute; left: 2vw; top: 10vh; bottom: 10vh; width: 5px; background: repeating-linear-gradient(to bottom, #71858955 0 1px, transparent 1px 16px); }
+.nomad-login-scan::after { content: ""; position: absolute; width: 12px; height: 1px; background: #97c7cf; animation: nomad-calibrate 12s linear infinite alternate; }
+.nomad-login-reveal .nomad-login-center { opacity: 0; transform: translate(-50%, -50%) scaleY(.94); transition: opacity .55s ease, transform .75s ease; animation: none; }
+.nomad-login-reveal .nomad-login-header, .nomad-login-reveal .nomad-login-footer, .nomad-login-reveal .nomad-login-checks { opacity: 0; transition: opacity .8s ease; }
+@keyframes nomad-calibrate { from { transform: translateY(0); } to { transform: translateY(75vh); } }
+@keyframes nomad-login-enter { from { opacity: 0; margin-top: 8px; } to { opacity: 1; margin-top: 0; } }
+@media (max-height: 700px) { .nomad-login-center { top: 45%; padding: 12px 26px; } .nomad-login-subtitle { margin-bottom: 16px; } .nomad-login-checks { bottom: 9vh; gap: 6px 20px; } .nomad-login-footer { bottom: 2vh; } }
+@media (prefers-reduced-motion: reduce) { .nomad-login-center, .nomad-login-scan::after { animation: none; } }
+.nomad-login-center, .nomad-login-header, .nomad-login-footer, .nomad-login-checks, .nomad-login-scan { z-index: 2; }
+.nomad-login-header > div, .nomad-login-footer > span, .nomad-login-checks > div { background: #050505d9; box-shadow: 0 0 16px 8px #050505b0; }
+#boot_screen.nomad-login h1::before, #boot_screen.nomad-login h1::after { display: none; }
+
+.nomad-login[data-auth-channel="UNKNOWN"] [data-login-session] { color: #c5a279; }

@@ -3,6 +3,8 @@
 const EXPECTED_BRIDGE_KEYS = Object.freeze([
     "applications",
     "assistant",
+    "auth",
+    "automation",
     "control",
     "log",
     "network",

@@ -11,6 +11,8 @@ app.setName(require("../src/package.json").productName);
 app.setPath("userData", fs.mkdtempSync(path.join(os.tmpdir(), "nomad-secure-gui-")));
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const testI3 = process.argv.includes("--test-i3");
+const automationGui = require("./automation.gui.js");
+const automationFixture = automationGui.fixture(app.getPath("userData"));
 if (testI3) {
     // Main-only fixture configuration; real registry validation and OS launches.
     // No user registry or application profile is modified.
@@ -25,7 +27,7 @@ if (testI3) {
             args: ["--no-one-instance", "--no-media-library", "--no-qt-privacy-ask"], wmClass: "vlc"}
     ]}), {mode: 0o600});
     registryModule.ApplicationRegistry = class extends RealRegistry {
-        constructor(options) { super({...options, registryPath}); }
+        constructor(options) { super({...options, registryPath, applicationDirectories: [automationFixture.desktops]}); }
     };
     const wmModule = require("../src/classes/i3WindowManager.class.js");
     const RealWindowManager = wmModule.I3WindowManager;
@@ -41,6 +43,10 @@ let tested = false;
 app.on("browser-window-created", (event, win) => {
     if (tested) return;
     tested = true;
+    const firstVisible = new Promise(resolve => win.once("show", () => {
+        win.webContents.executeJavaScript("Boolean(window.nomadLogin && window.nomadLogin.wave.frames > 0 && !document.getElementById('main_shell'))")
+            .then(resolve, () => resolve(false));
+    }));
     win.webContents.once("did-finish-load", async () => {
         const read = source => win.webContents.executeJavaScript(source, true);
         const until = async (predicate, label, timeout = 15000) => {
@@ -54,11 +60,54 @@ app.on("browser-window-created", (event, win) => {
         let savedClipboard;
         let exitCode = 0;
         try {
+            await until(() => read("window.nomadLogin && window.nomadLogin.state === 'AUTH_READY'"), "login ready", 20000);
+            assert(await read("!document.getElementById('main_shell') && !window.term"), "no terminal before confirmation");
+            assert(await read("document.body.classList.contains('nomad-login-active') && !document.getElementById('nomad_secure_bootstrap_status')"));
+            assert(await read("document.activeElement === window.nomadLogin.button"), "keyboard-first focus");
+            assert(await firstVisible, "first visible window contains painted waves and no terminal");
+            const loginStart = await read("window.nomadLogin.wave.frames");
+            const firstCanvas = await read("document.getElementById('ascii').toDataURL()");
+            fs.writeFileSync("/tmp/nomad-login.png", (await win.webContents.capturePage()).toPNG());
+            await read(`(() => {
+                window.loginCharacters = new Set();
+                const ctx = document.getElementById('ascii').getContext('2d');
+                const fill = ctx.fillText;
+                ctx.fillText = function(ch, ...args) { window.loginCharacters.add(ch); return fill.call(this, ch, ...args); };
+            })()`);
+            win.webContents.sendInputEvent({type: "mouseMove", x: 250, y: 250});
+            win.webContents.sendInputEvent({type: "keyDown", keyCode: "Escape"});
+            assert(await read("document.activeElement === window.nomadLogin.button"));
+            for (let second = 0; second < 20; second++) {
+                await sleep(1000);
+                assert(await read("window.nomadLogin.state === 'AUTH_READY'"), "login waits for explicit confirmation");
+            }
+            fs.writeFileSync("/tmp/nomad-login-observed.png", (await win.webContents.capturePage()).toPNG());
+            assert(await read("window.nomadLogin.button.textContent === '[ ENTER NOMAD ]' && getComputedStyle(window.nomadLogin.button).visibility === 'visible'"));
+            const frameCount = await read("window.nomadLogin.wave.frames") - loginStart;
+            assert(frameCount > 100 && frameCount <= 630, "live capped wave rendering");
+            assert.notStrictEqual(await read("document.getElementById('ascii').toDataURL()"), firstCanvas, "canvas pixels animate");
+            assert(await read("Array.from(window.loginCharacters).every(ch => ' nomad-UI'.includes(ch)) && window.loginCharacters.size > 3"));
+            assert(await read("window.nomadLogin.state === 'AUTH_READY' && !window.term"), "no timed auto-unlock");
+            console.log(`LOGIN OBSERVATION PASS: 20 seconds, ${frameCount} frames (${(frameCount / 20).toFixed(1)} FPS), live pixels, exact character set, focused confirmation, no premature terminal`);
+            win.webContents.sendInputEvent({type: "keyDown", keyCode: "Return"});
+            win.webContents.sendInputEvent({type: "keyUp", keyCode: "Return"});
+            let transitionCaptured = false;
             for (let i = 0; i < 100; i++) {
+                if (!transitionCaptured && await read("document.body.classList.contains('nomad-revealing')")) {
+                    assert(await read("getComputedStyle(document.getElementById('main_shell')).visibility === 'visible'"));
+                    fs.writeFileSync("/tmp/nomad-transition.png", (await win.webContents.capturePage()).toPNG());
+                    transitionCaptured = true;
+                }
                 if (await read("document.body.dataset.nomadRendererReady === 'true'")) break;
                 await sleep(200);
             }
+            assert(transitionCaptured, "HUD and login share the reveal scene");
             assert(await read("document.body.dataset.nomadRendererReady === 'true'"), "frontend ready");
+            assert(await read("window.nomadLogin.state === 'NOMAD_READY' && window.nomadLogin.wave.destroyed && !window.nomadLogin.wave.running && !document.getElementById('ascii')"), "wave destroyed after reveal");
+            const stoppedFrames = await read("window.nomadLogin.wave.frames");
+            await sleep(300);
+            assert.strictEqual(await read("window.nomadLogin.wave.frames"), stoppedFrames);
+            fs.writeFileSync("/tmp/nomad-ready.png", (await win.webContents.capturePage()).toPNG());
             const prefs = win.webContents.getLastWebPreferences();
             assert.strictEqual(prefs.nodeIntegration, false);
             assert.strictEqual(prefs.contextIsolation, true);
@@ -135,6 +184,7 @@ app.on("browser-window-created", (event, win) => {
             await sleep(1200);
             assert(await read("window.nomadControlPlane.input.value === '' && !window.nomadControlPlane.pending"), "virtual Enter submits assistant");
             await read("window.nomadControlPlane.close()");
+            await automationGui.acceptance(read, until, automationFixture);
             const repoCount = await read("window.repositoryLauncher.repositories.length");
             if (repoCount) {
                 assert(await read(`(async () => {

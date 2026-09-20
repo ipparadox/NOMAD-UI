@@ -194,11 +194,27 @@ class DesktopEntryDiscovery {
     }
 
     parseFile(filePath, desktopId) {
-        const stats = this.fs.statSync(filePath);
-        if (!stats.isFile()) throw new Error("Desktop entry is not a file");
-        if (stats.size > MAX_DESKTOP_FILE_BYTES) throw new Error("Desktop entry is too large");
-        const content = this.fs.readFileSync(filePath, {encoding: "utf8"});
-        return parseDesktopEntry(content, {desktopId, path: filePath});
+        const stats = this.fs.lstatSync(filePath);
+        if (!stats.isFile() || stats.isSymbolicLink() || stats.size > MAX_DESKTOP_FILE_BYTES
+            || (stats.mode & 0o022) || (typeof process.getuid === "function" && ![0, process.getuid()].includes(stats.uid))) {
+            throw new Error("Desktop entry ownership or type invalid");
+        }
+        // A symlink in any parent must not redirect trusted XDG discovery.
+        if (this.fs.realpathSync(filePath) !== filePath) throw new Error("Desktop entry path invalid");
+        const constants = this.fs.constants || fs.constants;
+        const fd = this.fs.openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        try {
+            const opened = this.fs.fstatSync(fd);
+            if (!opened.isFile() || opened.dev !== stats.dev || opened.ino !== stats.ino || opened.size !== stats.size) throw new Error("Desktop entry changed");
+            const buffer = Buffer.alloc(opened.size);
+            let offset = 0;
+            while (offset < buffer.length) {
+                const count = this.fs.readSync(fd, buffer, offset, buffer.length - offset, null);
+                if (!count) throw new Error("Desktop entry changed");
+                offset += count;
+            }
+            return parseDesktopEntry(buffer, {desktopId, path: filePath});
+        } finally { this.fs.closeSync(fd); }
     }
 
     scan() {
