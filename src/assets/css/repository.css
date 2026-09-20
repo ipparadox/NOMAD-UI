@@ -1,3 +1,25 @@
+.repository_run_profile {
+    display: flex;
+    align-items: center;
+    gap: .6em;
+    padding: .5em 0;
+    font-size: .85em;
+}
+
+.repository_run_profile[hidden] { display: none; }
+
+.repository_run_profile select {
+    min-width: 10em;
+    max-width: 100%;
+    padding: .3em;
+    border: 1px solid rgba(var(--color_r), var(--color_g), var(--color_b), .5);
+    color: rgb(var(--color_r), var(--color_g), var(--color_b));
+    background: var(--color_light_black);
+    font: inherit;
+}
+
+.repository_run_profile select:focus { outline: 1px solid currentColor; }
+
 section#repository {
     position: relative;
     top: -0.925vh;

@@ -849,6 +849,9 @@ app.on('ready', async () => {
         }
     });
     repositoryActions = new RepositoryActionService({
+        runSelectionPath: path.join(runtimePathPolicy.repositoryStateRoot, "run-selections.json"),
+        canPersistRunSelection: () => securityProfileService.get().profile === "NORMAL"
+            || (runtimePathPolicy.ephemeral && runtimePathPolicy.volatileRuntimeVerified),
         repositoryService,
         gitService: repositoryGitService,
         runProfileService: repositoryRunProfiles,
@@ -1045,6 +1048,9 @@ app.on('ready', async () => {
         onState: automationProgress
     });
     repositoryActions.automation = automationEngine;
+    const launchDoctor = new (require("./classes/launchDoctor.js").LaunchDoctor)();
+    repositoryActions.doctor = launchDoctor;
+    automationEngine.doctor = launchDoctor;
     applicationAutomation = new ApplicationAutomationService({
         applicationService: applicationControlService, applicationRegistry,
         getSecurityProfile: () => securityProfileService.get().profile,

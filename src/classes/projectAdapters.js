@@ -4,7 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const digest = value => `sha256:${crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
-const INPUTS = Object.freeze(["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".npmrc", ".yarnrc", ".yarnrc.yml", "pnpm-workspace.yaml", ".pnpmfile.cjs", ".cargo/config", ".cargo/config.toml", "pyproject.toml", "requirements.txt", "requirements-dev.txt", "Pipfile", "poetry.lock", "main.py", "app.py", "Cargo.toml", "Cargo.lock", "build.rs"]);
+const INPUTS = Object.freeze([".nvmrc", ".node-version", "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".npmrc", ".yarnrc", ".yarnrc.yml", "pnpm-workspace.yaml", ".pnpmfile.cjs", ".cargo/config", ".cargo/config.toml", "pyproject.toml", "requirements.txt", "requirements-dev.txt", "Pipfile", "poetry.lock", "main.py", "app.py", "Cargo.toml", "Cargo.lock", "build.rs"]);
 // Fixed, main-owned bootstrap: the sandbox path never comes from a caller.
 const VENV_EXEC = "import os,sys; os.execv('/workspace/.venv/bin/python', ['python'] + sys.argv[1:])";
 function readInputs(repository, io = fs) {

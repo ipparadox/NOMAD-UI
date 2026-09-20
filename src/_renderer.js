@@ -683,6 +683,9 @@ async function initUI() {
     folderPath.setAttribute("d", "M9.9994 3.9981h-6c-1.105 0-1.99.896-1.99 2l-.01 12c0 1.104.895 2 2 2h16c1.104 0 2-.896 2-2V7.9981c0-1.104-.896-2-2-2h-8l-1.9996-2z");
     folderIcon.appendChild(folderPath);
     window.repositoryLauncher = new RepositoryLauncher({
+        onprofileselect: (repositoryId, profileId) => nomadBridge
+            ? nomadBridge.repositories.selectRunProfile(repositoryId, profileId)
+            : ipc.invoke("repository-operation", {operation: "select-run-profile", repositoryId, profileId}),
         container: "repository_container",
         addTrigger: "repository_add",
         folderIcon,
@@ -720,6 +723,10 @@ async function initUI() {
                 delete bridgeRequest.operation;
                 result = await nomadBridge.repositories.action(bridgeRequest);
             } else result = await ipc.invoke("repository-operation", request);
+            if (result && result.launch && window.nomadControlPlane) {
+                window.repositoryLauncher.close({restoreFocus: false});
+                window.nomadControlPlane.open("assistant"); window.nomadControlPlane._renderResult(result);
+            }
             if (!result || !result.ok) return result;
 
             if (result.activateAppId === "terminal") {

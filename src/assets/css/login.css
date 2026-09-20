@@ -1,48 +1,146 @@
-/* Standalone first-frame styles, independent of the asynchronously loaded theme. */
+/* Login-only typography and chrome. The live ASCII canvas is unchanged. */
+@font-face { font-family: "Nomad Field"; src: url("../fonts/united_sans_medium.woff2") format("woff2"); font-display: swap; }
+@font-face { font-family: "Nomad Mono"; src: url("../fonts/fira_mono.woff2") format("woff2"); font-display: swap; }
 body.nomad-login-active { background: #050505; }
 body.nomad-login-active > :not(#boot_screen):not(script) { visibility: hidden !important; pointer-events: none !important; }
 body.nomad-login-active.nomad-revealing > :not(#boot_screen):not(script) { visibility: visible !important; }
 #boot_screen.nomad-login {
+    --login-ink: #e4eff4; --login-muted: #839da9; --login-accent: #83cbe3; --login-line: #7ab8d036;
     position: fixed; inset: 0; width: 100%; height: 100%; z-index: 100000;
     display: block; padding: 0; margin: 0; background: #050505;
-    color: #c9d0d1; font: 12px/1.6 "SF Mono", Menlo, Consolas, "Courier New", monospace;
-    letter-spacing: .12em; text-transform: uppercase; cursor: default !important;
+    color: var(--login-ink); font: 10px/1.6 "Nomad Mono", monospace;
+    letter-spacing: .1em; text-transform: uppercase; cursor: default !important;
 }
 .nomad-login *, .nomad-login *::before, .nomad-login *::after { box-sizing: border-box; }
 #ascii { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; z-index: 0; }
-.nomad-login-shade { position: absolute; inset: 0; z-index: 1; background: radial-gradient(ellipse 370px 350px at 50% 47%, #050505fa 0%, #050505eb 55%, #05050590 78%, transparent 100%); pointer-events: none; }
-.nomad-login-header, .nomad-login-footer { position: absolute; left: 4vw; right: 4vw; display: flex; justify-content: space-between; align-items: center; gap: 24px; }
-.nomad-login-header { top: 4vh; border-top: 1px solid #7aafb449; padding-top: 14px; }
-.nomad-login-footer { bottom: 4vh; border-bottom: 1px solid #7aafb449; padding-bottom: 14px; font-size: 10px; }
-.nomad-login-label { color: #819094; font-size: 10px; letter-spacing: .2em; }
-.nomad-login-center { position: absolute; left: 50%; top: 48%; width: min(460px, 78vw); transform: translate(-50%, -50%); padding: 26px 34px; animation: nomad-login-enter .65s ease-out both; }
-.nomad-login-center::before, .nomad-login-center::after { content: ""; position: absolute; width: 20px; height: 48px; border-color: #78b0b8; border-style: solid; }
-.nomad-login-center::before { top: 0; left: 0; border-width: 1px 0 0 1px; }
-.nomad-login-center::after { bottom: 0; right: 0; border-width: 0 1px 1px 0; }
-#boot_screen.nomad-login h1 { font: 500 clamp(42px, 5vw, 68px)/1 "SF Mono", Menlo, Consolas, monospace; letter-spacing: .23em; color: #edf0ef; margin: 0 0 18px; padding: 0; border: none; text-align: left; opacity: 1; animation: none; }
-.nomad-login-subtitle { color: #8bb8be; font-size: 11px; letter-spacing: .24em; margin-bottom: 34px; }
-.nomad-login-identity { border-top: 1px solid #77878c66; border-bottom: 1px solid #77878c66; padding: 16px 0; margin: 18px 0; }
-[data-login-operator] { display: block; color: #edf0ef; font-size: 20px; letter-spacing: .08em; text-transform: none; }
-[data-login-session] { color: #a8b798; font-size: 10px; line-height: 1.8; }
-.nomad-login-notice { font-size: 10px; letter-spacing: .02em; color: #8d999c; text-transform: none; margin: 12px 0 24px; }
-#boot_screen.nomad-login button { width: 100%; border: 1px solid #8bb8be80; border-radius: 0; padding: 15px 12px; background: #0a1113e8; color: #d8eaed; font: inherit; letter-spacing: .15em; cursor: pointer; transition: border-color .2s, background .2s, box-shadow .2s; }
-#boot_screen.nomad-login button:focus { outline: 1px solid #b7d8db; outline-offset: 5px; background: #132125; box-shadow: inset 3px 0 #8bb8be; }
-#boot_screen.nomad-login button:disabled { color: #819094; cursor: default; }
-[data-login-status] { margin-top: 18px; min-height: 2em; font-size: 10px; color: #9caaa6; }
-[data-state="AUTH_FAILED"] [data-login-status] { color: #c5a279; }
-[data-state="AUTH_SUCCESS"] [data-login-status], [data-state="SESSION_INITIALIZING"] [data-login-status] { color: #abbf97; }
-.nomad-login-checks { position: absolute; bottom: 12vh; left: 4vw; right: 4vw; display: flex; flex-wrap: wrap; gap: 20px 40px; font-size: 10px; }
-.nomad-login-checks span { display: block; color: #abc2c4; }
-.nomad-login-scan { position: absolute; left: 2vw; top: 10vh; bottom: 10vh; width: 5px; background: repeating-linear-gradient(to bottom, #71858955 0 1px, transparent 1px 16px); }
-.nomad-login-scan::after { content: ""; position: absolute; width: 12px; height: 1px; background: #97c7cf; animation: nomad-calibrate 12s linear infinite alternate; }
-.nomad-login-reveal .nomad-login-center { opacity: 0; transform: translate(-50%, -50%) scaleY(.94); transition: opacity .55s ease, transform .75s ease; animation: none; }
-.nomad-login-reveal .nomad-login-header, .nomad-login-reveal .nomad-login-footer, .nomad-login-reveal .nomad-login-checks { opacity: 0; transition: opacity .8s ease; }
-@keyframes nomad-calibrate { from { transform: translateY(0); } to { transform: translateY(75vh); } }
-@keyframes nomad-login-enter { from { opacity: 0; margin-top: 8px; } to { opacity: 1; margin-top: 0; } }
-@media (max-height: 700px) { .nomad-login-center { top: 45%; padding: 12px 26px; } .nomad-login-subtitle { margin-bottom: 16px; } .nomad-login-checks { bottom: 9vh; gap: 6px 20px; } .nomad-login-footer { bottom: 2vh; } }
-@media (prefers-reduced-motion: reduce) { .nomad-login-center, .nomad-login-scan::after { animation: none; } }
-.nomad-login-center, .nomad-login-header, .nomad-login-footer, .nomad-login-checks, .nomad-login-scan { z-index: 2; }
-.nomad-login-header > div, .nomad-login-footer > span, .nomad-login-checks > div { background: #050505d9; box-shadow: 0 0 16px 8px #050505b0; }
+.nomad-login-shade { position: absolute; inset: 0; z-index: 1; background: radial-gradient(ellipse 48vw 65vh at 50% 47%, #02060a66 0%, #02060a20 65%, transparent 100%), linear-gradient(#02060a80, #02060a80); pointer-events: none; }
+.nomad-login-frame { position: absolute; inset: 22px; border: 1px solid #7ab8d019; pointer-events: none; z-index: 2; }
+.nomad-login-frame::before, .nomad-login-frame::after { content: "+"; position: absolute; color: #83cbe399; font-size: 16px; line-height: 1; background: #050505; }
+.nomad-login-frame::before { left: -5px; top: -8px; }
+.nomad-login-frame::after { right: -5px; bottom: -8px; }
+.nomad-login-header, .nomad-login-bottom, .nomad-login-access { position: absolute; z-index: 2; left: 48px; right: 48px; }
+.nomad-login-header { top: 44px; display: flex; align-items: flex-start; justify-content: space-between; gap: 32px; animation: nomad-panel-enter .7s .08s ease both; }
+.nomad-login-command { display: flex; gap: 15px; align-items: center; padding: 12px 18px 12px 12px; border-left: 1px solid var(--login-line); background: #050b12f2; }
+.nomad-login-insignia { display: grid; place-items: center; width: 43px; height: 50px; border: 1px solid #83cbe369; color: var(--login-accent); font-size: 30px; box-shadow: inset 0 0 0 4px #05090d, inset 0 0 0 5px #7ab8d026; }
+.nomad-login-command strong { display: block; font: 24px/1 "Nomad Field", sans-serif; letter-spacing: .15em; }
+.nomad-login-command span:not(.nomad-login-insignia) { display: block; color: #b1c5d0; margin-top: 7px; font-size: 10px; }
+.nomad-login-command small { color: var(--login-muted); font-size: 8px; letter-spacing: .12em; }
+.nomad-login-metadata { width: 245px; padding: 12px 14px; border-right: 1px solid var(--login-line); background: #050b12f2; }
+.nomad-login-classification { color: var(--login-accent); border-bottom: 1px solid var(--login-line); padding-bottom: 8px; font-size: 9px; letter-spacing: .14em; }
+.nomad-login-metadata dl { margin: 9px 0 0; display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 2px 12px; font-size: 9px; }
+.nomad-login-metadata dt { color: var(--login-muted); }
+.nomad-login-metadata dd { margin: 0; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nomad-login-stage { position: absolute; inset: 126px 24px 148px; z-index: 2; display: flex; align-items: center; justify-content: center; pointer-events: none; }
+.nomad-login-center {
+    position: relative; width: 446px; max-width: 100%; padding: 23px 30px 20px; pointer-events: auto;
+    border: 1px solid #85c4e04d;
+    background: linear-gradient(125deg, #13222dee, #09121bf2 43%, #071018f5);
+    box-shadow: 0 22px 64px #0009, inset 0 1px #c6e6f21a, inset 0 0 0 5px #02091059;
+    animation: nomad-panel-enter .8s .16s ease both;
+}
+.nomad-login-center::before, .nomad-login-center::after {
+    content: ""; position: absolute; inset: -2px; pointer-events: none;
+    background: linear-gradient(#9edaf1, #9edaf1) left top / 21px 2px no-repeat,
+        linear-gradient(#9edaf1, #9edaf1) right top / 21px 2px no-repeat,
+        linear-gradient(#9edaf1, #9edaf1) left bottom / 21px 2px no-repeat,
+        linear-gradient(#9edaf1, #9edaf1) right bottom / 21px 2px no-repeat;
+}
+.nomad-login-center::after { background: linear-gradient(#9edaf1, #9edaf1) left top / 2px 21px no-repeat,
+    linear-gradient(#9edaf1, #9edaf1) right top / 2px 21px no-repeat,
+    linear-gradient(#9edaf1, #9edaf1) left bottom / 2px 21px no-repeat,
+    linear-gradient(#9edaf1, #9edaf1) right bottom / 2px 21px no-repeat; }
+.nomad-login-card-rail { display: flex; justify-content: space-between; gap: 10px; color: var(--login-muted); font-size: 8px; letter-spacing: .13em; }
+.nomad-login-indicator::before { content: ""; display: inline-block; width: 4px; height: 4px; margin: 0 7px 1px 0; background: var(--login-accent); animation: nomad-indicator 4s ease-in-out infinite; }
+.nomad-login-brand { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 24px 0 23px; }
+#boot_screen.nomad-login h1 { font: 700 62px/.9 "Nomad Field", sans-serif; letter-spacing: .045em; color: #eef7fc; margin: 0; padding: 0; border: none; text-align: left; opacity: 1; animation: none; }
 #boot_screen.nomad-login h1::before, #boot_screen.nomad-login h1::after { display: none; }
-
-.nomad-login[data-auth-channel="UNKNOWN"] [data-login-session] { color: #c5a279; }
+.nomad-login-subtitle { border-left: 1px solid #83cbe35c; padding-left: 15px; font: 14px/1.25 "Nomad Field", sans-serif; letter-spacing: .12em; color: #c2d7e3; }
+.nomad-login-subtitle span { display: block; margin-top: 6px; color: var(--login-muted); font: 7px/1.3 "Nomad Mono", monospace; letter-spacing: .06em; white-space: nowrap; }
+.nomad-login-section-heading { display: flex; justify-content: space-between; gap: 8px; padding: 9px 0; border-top: 1px solid #83cbe35c; border-bottom: 1px solid var(--login-line); color: var(--login-accent); font-size: 8px; letter-spacing: .1em; }
+.nomad-login-section-heading > :last-child { color: var(--login-muted); }
+.nomad-login-label { color: var(--login-muted); font-size: 9px; letter-spacing: .14em; }
+.nomad-login-identity { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 19px 0 17px; border-bottom: 1px solid var(--login-line); }
+.nomad-login-identity > div { min-width: 0; }
+[data-login-operator] { display: block; font: 25px/1.4 "Nomad Field", sans-serif; letter-spacing: .06em; text-transform: none; overflow-wrap: anywhere; max-height: 70px; overflow: auto; }
+.nomad-login-identity-mark { flex-shrink: 0; border: 1px solid var(--login-line); width: 40px; text-align: center; padding: 3px; font: 18px/1.3 "Nomad Field", sans-serif; color: #87aabf; }
+.nomad-login-identity-mark span { display: block; font: 7px/1.4 "Nomad Mono", monospace; }
+.nomad-login-auth { padding: 17px 0 18px; }
+.nomad-login-auth-type { float: right; color: #abc2ce; font-size: 8px; }
+[data-login-session] { margin-top: 9px; color: #bed4df; font-size: 9px; letter-spacing: .025em; line-height: 1.7; }
+.nomad-login-notice { font: 10px/1.7 "Nomad Mono", monospace; letter-spacing: 0; color: #95aab7; text-transform: none; margin: 8px 0 0; }
+#boot_screen.nomad-login button { position: relative; width: 100%; border: 1px solid #8bc9e3a6; border-radius: 0; padding: 14px 40px 14px 17px; text-align: left; background: linear-gradient(100deg, #224051b0, #112331c9); color: #e3f4fc; font: 14px/1.4 "Nomad Field", sans-serif; letter-spacing: .16em; cursor: pointer; transition: border-color .2s, background-color .2s, box-shadow .2s; }
+#boot_screen.nomad-login button::after { content: "→"; position: absolute; right: 16px; top: 50%; transform: translateY(-50%); color: #9edaf1; font: 23px/1 sans-serif; transition: right .2s; }
+#boot_screen.nomad-login button:hover:not(:disabled) { background-color: #284c60; border-color: #bbe5f8; }
+#boot_screen.nomad-login button:hover:not(:disabled)::after { right: 12px; }
+#boot_screen.nomad-login button:focus { outline: 1px solid #a8d7ed; outline-offset: 4px; box-shadow: inset 3px 0 #a8d7ed; }
+#boot_screen.nomad-login button:disabled { color: #91a4ae; border-color: #7ab8d047; cursor: default; }
+[data-login-status] { margin: 13px 0 16px; min-height: 16px; font-size: 8px; letter-spacing: .075em; color: #9fbccc; }
+[data-state="AUTH_FAILED"] [data-login-status] { color: #e5b884; }
+[data-state="AUTH_SUCCESS"] [data-login-status], [data-state="SESSION_INITIALIZING"] [data-login-status] { color: #b5d3bb; }
+.nomad-login-card-footer { text-align: center; border-top: 1px solid var(--login-line); padding-top: 13px; }
+.nomad-login-card-footer > strong { display: block; font: 11px/1.5 "Nomad Field", sans-serif; letter-spacing: .17em; color: #bed3df; }
+.nomad-login-card-footer > span { font-size: 7px; letter-spacing: .09em; color: var(--login-muted); }
+.nomad-login-card-footer > div { display: flex; justify-content: space-between; gap: 8px; margin-top: 13px; font-size: 7px; letter-spacing: .03em; color: #8da6b4; }
+.nomad-login-access { left: auto; bottom: 163px; padding: 11px 0 11px 17px; border-left: 2px solid #83cbe36b; background: #050c14f2; padding-right: 17px; animation: nomad-panel-enter .8s .3s ease both; }
+.nomad-login-access strong { display: block; font: 14px/1.8 "Nomad Field", sans-serif; letter-spacing: .13em; }
+.nomad-login-access > span:last-child { font-size: 8px; color: var(--login-muted); }
+.nomad-login-bottom { bottom: 34px; animation: nomad-panel-enter .8s .24s ease both; }
+.nomad-login-checks { display: grid; grid-template-columns: 1.4fr repeat(6, 1fr); padding: 16px 0; border-top: 1px solid #83cbe355; border-bottom: 1px solid var(--login-line); background: linear-gradient(90deg, #06101cf7, #070f17f7); }
+.nomad-login-checks > div { min-width: 0; padding: 0 17px; border-right: 1px solid var(--login-line); }
+.nomad-login-checks > div:last-child { border-right: 0; }
+.nomad-login-checks .nomad-login-label { font-size: 9px; letter-spacing: .1em; }
+.nomad-login-checks > div > span { display: block; color: #b9d4e4; margin-top: 6px; font-size: 10px; letter-spacing: .03em; overflow-wrap: anywhere; }
+.nomad-login-footer { display: flex; justify-content: space-between; gap: 20px; padding: 10px 12px 0; color: #8ba7b8; font-size: 9px; background: #050b12f2; }
+.nomad-login-footer-code { display: flex; gap: 18px; align-items: center; }
+.nomad-login-footer i { width: 35px; height: 5px; background: repeating-linear-gradient(90deg, #79aec7 0 4px, transparent 4px 7px); }
+.nomad-login-footer time { color: #c5d9e6; margin-left: 12px; font-variant-numeric: tabular-nums; }
+.nomad-login-reveal .nomad-login-center { opacity: 0; transform: translateY(-8px); transition: opacity .55s ease, transform .75s ease; animation: none; }
+.nomad-login-reveal .nomad-login-header, .nomad-login-reveal .nomad-login-bottom, .nomad-login-reveal .nomad-login-access { opacity: 0; transition: opacity .8s ease; animation: none; }
+@keyframes nomad-panel-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes nomad-indicator { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
+@media (max-width: 1150px) {
+    .nomad-login-access { display: none; }
+    .nomad-login-header, .nomad-login-bottom { left: 32px; right: 32px; }
+    .nomad-login-checks > div { padding: 0 9px; }
+}
+@media (max-height: 800px) {
+    .nomad-login-header { top: 30px; }
+    .nomad-login-stage { inset: 100px 24px 122px; }
+    .nomad-login-center { padding: 12px 26px; }
+    .nomad-login-brand { padding: 14px 0; }
+    .nomad-login-identity { padding: 10px 0; }
+    .nomad-login-auth { padding: 10px 0; }
+    [data-login-status] { margin: 8px 0; }
+    .nomad-login-card-footer { padding-top: 8px; }
+    .nomad-login-bottom { bottom: 27px; }
+    .nomad-login-checks { padding: 12px 0; }
+    .nomad-login-access { bottom: 136px; }
+}
+@media (max-width: 700px), (max-height: 650px) {
+    #boot_screen.nomad-login { overflow: auto; }
+    .nomad-login-header, .nomad-login-stage, .nomad-login-bottom { position: relative; inset: auto; width: auto; margin: 24px; }
+    .nomad-login-header { gap: 15px; }
+    .nomad-login-command strong { font-size: 19px; }
+    .nomad-login-insignia { display: none; }
+    .nomad-login-metadata { width: 180px; }
+    .nomad-login-classification { font-size: 7px; }
+    .nomad-login-stage { margin: 36px 24px; }
+    .nomad-login-access { display: none; }
+    .nomad-login-frame { display: none; }
+    .nomad-login-checks { grid-template-columns: repeat(4, 1fr); gap: 15px 0; }
+    .nomad-login-footer-code > span { display: none; }
+}
+@media (max-width: 420px) {
+    .nomad-login-center { padding: 16px; }
+    #boot_screen.nomad-login h1 { font-size: 48px; }
+    .nomad-login-subtitle { font-size: 11px; padding-left: 10px; }
+    .nomad-login-subtitle span { display: none; }
+    .nomad-login-command small { display: none; }
+    .nomad-login-command span:not(.nomad-login-insignia) { font-size: 8px; }
+    .nomad-login-metadata { width: 150px; }
+    .nomad-login-checks { grid-template-columns: repeat(2, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .nomad-login-center, .nomad-login-header, .nomad-login-bottom, .nomad-login-access, .nomad-login-indicator::before { animation: none; }
+    #boot_screen.nomad-login button, #boot_screen.nomad-login button::after { transition: none; }
+}

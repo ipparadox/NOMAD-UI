@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const {RepositoryRunSelectionStore} = require("./repositoryRunSelectionStore.js");
 const {
     RepositoryGitError,
     RepositoryGitExecutor,
@@ -12,7 +13,8 @@ const {
 const {
     PROFILE_ID_PATTERN,
     RepositoryRunError,
-    RepositoryRunProfileService
+    RepositoryRunProfileService,
+    fingerprint
 } = require("./repositoryRunProfileService.js");
 const {
     ACTIVE_STATES,
@@ -450,6 +452,7 @@ class RepositoryActionService {
         this.nowMilliseconds = opts.nowMilliseconds || Date.now;
         this.authorizationTtlMs = Number.isSafeInteger(opts.authorizationTtlMs) ? opts.authorizationTtlMs : 5 * 60 * 1000;
         this.pendingAuthorizations = new Map();
+        this.runSelections = new RepositoryRunSelectionStore(opts.runSelectionPath, opts.canPersistRunSelection);
         this.actions = new Map();
         this.registerAction(REPOSITORY_ACTIONS[0], context => this._code(context), () => Boolean(this.openCode) && this.applicationAvailable("code"));
         this.registerAction(REPOSITORY_ACTIONS[1], context => this._terminal(context), () => Boolean(this.writeTerminal));
@@ -529,6 +532,13 @@ class RepositoryActionService {
         const runInspection = internal
             ? this.runProfileService.inspect(internal)
             : {candidates: [], trustStoreStatus: null};
+        // Only fixed adapter definitions; selecting one does not grant run authorization.
+        publicRepository.runProfiles = runInspection.candidates.map(candidate => ({
+            profileId: candidate.profileId,
+            displayName: candidate.displayName
+        }));
+        publicRepository.selectedRunProfileId = internal
+            ? this._runSelection(internal, runInspection).profileId : null;
         const executionSecurity = this._executionSecurity(processStatus);
         executionSecurity.authorization = runInspection.candidates.length
             && runInspection.candidates.every(candidate => candidate.authorizationState === "APPROVED")
@@ -539,6 +549,12 @@ class RepositoryActionService {
         } else if (internal && !processActive) pullCapability = await this.gitService.inspectUpdate(internal);
         if (internal && this.automation) publicRepository.project = this.automation.project(internal);
         publicRepository.process = processStatus;
+        if (this.doctor && internal) {
+            const last = this.doctor.history.get(repository.id);
+            try {
+                if (last && last.fingerprint === require("./projectAdapters.js").inspectProject(internal).fingerprint) publicRepository.launch = last;
+            } catch (_) {}
+        }
         publicRepository.executionSecurity = executionSecurity;
         publicRepository.actions = Array.from(this.actions.values()).map(action => {
             let enabled;
@@ -623,6 +639,33 @@ class RepositoryActionService {
         };
     }
 
+    _runSelection(repository, inspection) {
+        const key = fingerprint([repository.executionIdentity, repository.repositoryIdentity,
+            inspection.candidates.map(p => [p.profileId, p.profileFingerprint, p.sourceFingerprint])
+                .sort((a, b) => a[0].localeCompare(b[0]))]);
+        const previous = this.runSelections.get(repository.id);
+        const profileId = previous && previous.fingerprint === key
+            && inspection.candidates.some(p => p.profileId === previous.profileId) ? previous.profileId
+            : (!previous && inspection.candidates.length === 1 ? inspection.candidates[0].profileId : null);
+        const selection = {fingerprint: key, profileId};
+        if (previous || inspection.candidates.length) this.runSelections.set(repository.id, selection);
+        return selection;
+    }
+
+    async selectRunProfile(repositoryId, profileId) {
+        try {
+            const repository = await this.repositoryService.resolveRepository(repositoryId, {refreshMetadata: true});
+            const inspection = this.runProfileService.inspect(repository);
+            const selection = this._runSelection(repository, inspection);
+            if (!PROFILE_ID_PATTERN.test(profileId || "")
+                || !inspection.candidates.some(p => p.profileId === profileId)) {
+                return {ok: false, status: "RUN PROFILE NOT FOUND"};
+            }
+            this.runSelections.set(repository.id, {...selection, profileId});
+            return {ok: true, status: "RUN PROFILE SELECTED", repository: await this._decorate(this._publicRepository(repository), repository)};
+        } catch (_) { return {ok: false, status: "REPOSITORY UNAVAILABLE"}; }
+    }
+
     async _run(context) {
         if (this.automation && this.automation.active(context.repository.id)) return {ok: false, status: "PROJECT SETUP RUNNING"};
         const repository = context.repository;
@@ -646,13 +689,14 @@ class RepositoryActionService {
         }
 
         const inspection = this.runProfileService.inspect(repository);
+        const selection = this._runSelection(repository, inspection);
         if (!inspection.candidates.length) return {ok: false, status: "NO SAFE RUN PROFILE DETECTED"};
         let candidate = null;
         if (request.profileId) {
             candidate = inspection.candidates.find(profile => profile.profileId === request.profileId) || null;
             if (!candidate) return {ok: false, status: "RUN PROFILE NOT FOUND"};
-        } else if (inspection.candidates.length === 1) {
-            candidate = inspection.candidates[0];
+        } else if (selection.profileId) {
+            candidate = inspection.candidates.find(profile => profile.profileId === selection.profileId);
         }
 
         if (request.authorization) {
@@ -699,6 +743,40 @@ class RepositoryActionService {
     }
 
     async _launch(repository, candidate) {
+        let launch = null;
+        if (this.doctor) {
+            launch = await this.doctor.preflight(repository, candidate, this.automation);
+            if (!launch.ok) return {ok: false, status: launch.findings.some(f => f.repairClass === "B")
+                ? `REPAIR REQUIRES AUTHORIZATION / ${launch.status} / USE PREPARE; DEPENDENCY INSTALLATION MAY EXECUTE PROJECT SCRIPTS`
+                : launch.status, launch: {...launch, profile: undefined}, repositoryId: repository.id, actionId: "run"};
+            const current = await this.repositoryService.resolveRepository(repository.id, {refreshMetadata: true});
+            const fresh = this.runProfileService.inspect(current).candidates.find(p => p.profileId === candidate.profileId);
+            if (current.executionIdentity !== repository.executionIdentity || !fresh || fresh.profileFingerprint !== candidate.profileFingerprint) return {ok: false, status: "PROJECT CHANGED / RUN AUTHORIZATION REQUIRED"};
+            const policy = this._executionSecurity();
+            if (!policy.allowed) return {ok: false, status: policy.status};
+            candidate = launch.profile;
+        }
+        if (launch) {
+            const trustedCandidate = this.runProfileService.inspect(repository).candidates.find(p => p.profileId === candidate.profileId);
+            const captured = {stdout: "", stderr: ""};
+            candidate = {...candidate, boundedOutput: (chunk, stream = "stdout") => {
+                captured[stream] = (captured[stream] + chunk.toString("utf8")).slice(-32768);
+            }};
+            const result = this.processManager.start(repository, candidate);
+            const record = this.processManager.records && this.processManager.records.get(repository.id);
+            if (record) record.launchContext = {profileId: candidate.profileId, projectType: launch.type,
+                runtime: launch.runtime, fingerprint: launch.fingerprint, setupState: this.automation ? this.automation.inspectRecord(repository).state : "UNKNOWN"};
+            if (record && record.child) record.child.once("close", async () => {
+                if (record.exitCode === 0 || record.state === "STOPPED") return;
+                try {
+                    const failure = await this.doctor.classify(repository, trustedCandidate, this.automation, {exitCode: record.exitCode, ...captured, output: captured.stdout + captured.stderr});
+                    record.diagnosis = failure;
+                    this.processManager._emitState(record);
+                } catch (_) { record.diagnosis = {cause: "UNKNOWN", status: "PROCESS FAILED / MANUAL REVIEW REQUIRED"}; }
+            });
+            return {ok: result.ok, status: result.status, actionId: "run", duplicate: result.duplicate === true,
+                repository: await this._decorate(this._publicRepository(repository), repository)};
+        }
         const result = this.processManager.start(repository, candidate);
         return {
             ok: result.ok,
@@ -894,6 +972,12 @@ async function handleRepositoryRequest(actions, request) {
     if (request.operation === "cancel-clone") {
         if (Object.keys(request).some(key => key !== "operation")) return {ok: false, status: "INVALID REQUEST"};
         return actions.cancelClone();
+    }
+    if (request.operation === "select-run-profile") {
+        if (Object.keys(request).some(key => !["operation", "repositoryId", "profileId"].includes(key))
+            || !normalizeRepositoryId(request.repositoryId) || typeof request.profileId !== "string"
+            || !PROFILE_ID_PATTERN.test(request.profileId)) return {ok: false, status: "INVALID REQUEST"};
+        return actions.selectRunProfile(request.repositoryId, request.profileId);
     }
     if (request.operation !== "action") return {ok: false, status: "UNSUPPORTED OPERATION"};
     const allowedKeys = [

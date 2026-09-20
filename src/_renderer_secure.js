@@ -72,6 +72,7 @@ function reportSecureBootstrapFailure(stage, error) {
     }
     secureBootstrapStage = "DOM";
     window.nomadBootstrap = bootstrap;
+    login.signal("version", bootstrap.appVersion || "NOT REPORTED");
     window.settings = bootstrap.settings;
     window.shortcuts = Array.isArray(bootstrap.shortcuts) ? bootstrap.shortcuts : [];
     window.theme = bootstrap.theme;
@@ -453,6 +454,11 @@ function reportSecureBootstrapFailure(stage, error) {
             });
         }
         const result = await bridge.repositories.action(request);
+        if (result && result.launch && controlPlane) {
+            window.repositoryLauncher.close({restoreFocus: false});
+            controlPlane.open("assistant");
+            controlPlane._renderResult(result);
+        }
         if (result && result.application && result.activateAppId) {
             const application = Object.assign({}, result.application, {state: "ACTIVE", running: true});
             window.workspaceManager.synchronize(result.activateAppId, application);
@@ -469,6 +475,7 @@ function reportSecureBootstrapFailure(stage, error) {
         folderIcon,
         loadRepositories: () => bridge.repositories.refresh(),
         onaction: runRepositoryAction,
+        onprofileselect: (repositoryId, profileId) => bridge.repositories.selectRunProfile(repositoryId, profileId),
         onclone: async repositoryUrl => {
             if (!controlPlane) return {ok: false, status: "NOMAD CONTROL UNAVAILABLE"};
             controlPlane.open("assistant");
@@ -727,7 +734,8 @@ function reportSecureBootstrapFailure(stage, error) {
         telemetryState.network.globeInitialized ? "Globe initialized" : "Globe unavailable");
     const controlStatus = await bridge.control.setContext({});
     login.signal("control", controlStatus && controlStatus.ok ? "READY" : "UNKNOWN");
-    login.signal("telemetry", `${telemetryState.system.available ? "LIVE" : "UNAVAILABLE"} / ${telemetryState.network.available ? "LIVE" : "UNAVAILABLE"}`);
+    login.signal("telemetry", telemetryState.system.available ? "LIVE" : "UNAVAILABLE");
+    login.signal("network", telemetryState.network.available ? "LIVE" : "UNAVAILABLE");
     await login.reveal();
     window.nomadInputCapture.release("nomad-login");
     focusActiveTerminal();

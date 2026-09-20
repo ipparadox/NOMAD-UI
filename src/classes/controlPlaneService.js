@@ -255,8 +255,52 @@ class ControlPlaneService {
             () => this.automation ? this.automation.list() : {ok: false, status: "AUTOMATION UNAVAILABLE"});
         register("PROJECT_INSPECT", "INSPECT PROJECT", "READ_ONLY", "REPOSITORY", "NONE", ["PARSE PROJECT METADATA ONLY"],
             c => this.automation ? this.automation.inspect(c.targetId) : {ok: false, status: "AUTOMATION UNAVAILABLE"});
-        ["PROJECT_PREPARE", "PROJECT_SETUP", "PROJECT_SETUP_WITH_HOOKS"].forEach(id => register(id, "PREPARE PROJECT", "PERSISTENT", "REPOSITORY", "NONE", ["AUTHORIZED ISOLATED DEPENDENCY SETUP"],
+        ["PROJECT_REPAIR", "PROJECT_PREPARE", "PROJECT_SETUP", "PROJECT_SETUP_WITH_HOOKS"].forEach(id => register(id, "PREPARE PROJECT", "PERSISTENT", "REPOSITORY", "NONE", ["AUTHORIZED ISOLATED DEPENDENCY SETUP"],
             c => this.automation ? c.phase === "EXECUTE" ? this.automation.authorize(c.stored.automationPlan) : this.automation.plan(c.targetId, id === "PROJECT_SETUP_WITH_HOOKS") : {ok: false, status: "AUTOMATION UNAVAILABLE"}));
+        register("PROJECT_REPAIR_AND_RUN", "REPAIR & RUN", "PERSISTENT", "REPOSITORY", "NONE", ["AUTHORIZED SETUP AND ONE PROJECT LAUNCH"], async c => {
+            const actions = this.repositoryActions;
+            if (!this.automation || !actions || !actions.doctor) return {ok: false, status: "LAUNCH DOCTOR UNAVAILABLE"};
+            if (c.phase === "EXECUTE") {
+                const result = await this.automation.authorize(c.stored.automationPlan);
+                if (!result.operation || result.operation.state !== "RUNNING") return result;
+                const operation = this.automation.operations.get(result.operation.id);
+                operation.afterSuccess = async () => {
+                    const repository = await actions.repositoryService.resolveRepository(c.targetId);
+                    const candidate = actions.runProfileService.inspect(repository).candidates.find(p => p.profileId === c.stored.runProfileId);
+                    if (!candidate || candidate.profileFingerprint !== c.stored.runFingerprint || this._selectedProfile() !== c.stored.runSecurityProfile) return {ok: false, status: "PROJECT OR PROFILE CHANGED / RUN AUTHORIZATION REQUIRED"};
+                    const policy = actions._executionSecurity();
+                    if (!policy.allowed) return {ok: false, status: policy.status};
+                    return actions._launch(repository, candidate);
+                };
+                return result;
+            }
+            const repository = await actions.repositoryService.resolveRepository(c.targetId);
+            const inspection = actions.runProfileService.inspect(repository);
+            const selection = actions._runSelection(repository, inspection);
+            const candidate = inspection.candidates.find(p => p.profileId === selection.profileId) || (inspection.candidates.length === 1 ? inspection.candidates[0] : null);
+            if (!candidate) return {ok: false, status: "RUN PROFILE SELECTION REQUIRED"};
+            const diagnosis = await actions.doctor.preflight(repository, candidate, this.automation);
+            if (diagnosis.findings.some(f => f.repairClass === "C")) return {ok: false, status: diagnosis.status};
+            const plan = await this.automation.plan(c.targetId);
+            if (!plan.confirmation) return plan;
+            plan.confirmation.request = "REPAIR & RUN";
+            plan.confirmation.effects.push("EXECUTE SELECTED REPOSITORY RUN PROFILE ONCE AFTER VERIFIED SETUP");
+            plan.confirmation.fields.push({label: "RUN PROFILE", value: candidate.displayName});
+            plan.stored.runProfileId = candidate.profileId;
+            plan.stored.runFingerprint = candidate.profileFingerprint;
+            plan.stored.runSecurityProfile = this._selectedProfile();
+            return plan;
+        });
+        register("PROJECT_DIAGNOSE", "DIAGNOSE PROJECT", "READ_ONLY", "REPOSITORY", "NONE", ["READ PROJECT STATE"], async c => {
+            const actions = this.repositoryActions;
+            if (!actions || !actions.doctor) return {ok: false, status: "LAUNCH DOCTOR UNAVAILABLE"};
+            const repository = await actions.repositoryService.resolveRepository(c.targetId);
+            const inspection = actions.runProfileService.inspect(repository);
+            const selection = actions._runSelection(repository, inspection);
+            const candidate = inspection.candidates.find(p => p.profileId === selection.profileId) || (inspection.candidates.length === 1 ? inspection.candidates[0] : null);
+            const result = await actions.doctor.preflight(repository, candidate, this.automation);
+            return {ok: result.ok, kind: "diagnosis", status: result.status, diagnosis: {...result, profile: undefined}, repositoryId: c.targetId};
+        });
         register("PROJECT_RUN", "RUN PROJECT", "LOW", "REPOSITORY", "NONE", ["PRESERVE RUN AUTHORIZATION"], c => this._repositoryRun(c));
         register("PROJECT_STOP", "STOP PROJECT", "LOW", "REPOSITORY", "NONE", ["STOP TRACKED PROJECT ONLY"], async c => {
             const active = this.automation && this.automation.active(c.targetId);
@@ -278,8 +322,8 @@ class ControlPlaneService {
         });
         ["APPLICATION_SCAN", "APPLICATION_DISCOVERY_LIST"].forEach(id => register(id, "DISCOVER APPLICATIONS", "READ_ONLY", "NONE", "NONE", ["READ VERIFIED DESKTOP ENTRIES"],
             () => this.applicationAutomation ? this.applicationAutomation.scan() : {ok: false, status: "DISCOVERY UNAVAILABLE"}));
-        register("APPLICATION_REGISTER", "ADD TO NOMAD", "PERSISTENT", "APPLICATION", "USER", ["VERIFY APPLICATION IDENTITY"],
-            c => this.applicationAutomation ? c.phase === "EXECUTE" ? this.applicationAutomation.register(c.targetId, c.stored) : this.applicationAutomation.plan(c.targetId) : {ok: false, status: "DISCOVERY UNAVAILABLE"});
+        ["APPLICATION_REGISTER", "APPLICATION_REPAIR"].forEach(id => register(id, "VERIFY APPLICATION", "PERSISTENT", "APPLICATION", "USER", ["VERIFY APPLICATION IDENTITY"],
+            c => this.applicationAutomation ? c.phase === "EXECUTE" ? this.applicationAutomation.register(c.targetId, c.stored) : this.applicationAutomation.plan(c.targetId) : {ok: false, status: "DISCOVERY UNAVAILABLE"}));
         register("APPLICATION_IGNORE", "IGNORE APPLICATION", "LOW", "APPLICATION", "NONE", ["IGNORE FOR THIS SESSION"],
             c => this.applicationAutomation ? this.applicationAutomation.ignore(c.targetId) : {ok: false, status: "DISCOVERY UNAVAILABLE"});
 
@@ -419,8 +463,16 @@ class ControlPlaneService {
     }
 
     async _applicationOpen(appId) {
-        const application = this.applicationRegistry.get(appId);
-        if (!application) return {ok: false, status: "APPLICATION NOT REGISTERED"};
+        let application = this.applicationRegistry.get(appId);
+        if (!application) return {ok: false, status: "APPLICATION NOT REGISTERED / UNKNOWN EXECUTABLE NOT TRUSTED"};
+        if (this._selectedProfile() === "LOCKDOWN" && application.type !== "internal") return {ok: false, status: "PROFILE BLOCKED / LOCKDOWN"};
+        if (application.available === false && this.applicationAutomation && this.applicationAutomation.allowed()) {
+            this.applicationAutomation.reload();
+            application = this.applicationRegistry.get(appId);
+            if (!application) return {ok: false, status: "REGISTRY STALE / APPLICATION NOT REGISTERED"};
+        }
+        if (application.available === false) return {ok: false, kind: "application-open", status: application.status || "APPLICATION NOT INSTALLED",
+            cause: application.status === "WM_CLASS NOT AVAILABLE" ? "WM_CLASS_UNKNOWN" : "EXECUTABLE_MISSING"};
         const policy = this.applicationPolicy && this.applicationPolicy.evaluate(application);
         if (policy && !policy.allowed) return {ok: false, status: policy.status};
         if (application.type === "internal") return {

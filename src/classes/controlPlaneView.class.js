@@ -101,6 +101,7 @@ class ControlPlaneView {
         if (!input.trim()) return false;
         this._clear();
         this._line(`> ${input}`, "request");
+        this._line("CHECKING", "muted");
         this.input.value = "";
         this.pending = true;
         this._setBusy(true);
@@ -235,6 +236,23 @@ class ControlPlaneView {
             this._line("NOMAD CONTROL UNAVAILABLE", "error");
             return;
         }
+        if (result.launch && result.repositoryId) {
+            this._clear(); this._line("LAUNCH //"); this._line(result.status, "warning");
+            this._field("RUNTIME", result.launch.runtime);
+            this._field("DEPENDENCIES", result.launch.dependencies);
+            this.controls.append(this._button("REPAIR & RUN", () => this.request("PROJECT_REPAIR_AND_RUN", result.repositoryId)),
+                this._button("VIEW PLAN", () => this.request("PROJECT_REPAIR", result.repositoryId)),
+                this._button("CANCEL", () => this.close()));
+            return;
+        }
+        if (result.kind === "diagnosis") {
+            this._clear(); this._line("LAUNCH //");
+            this._field("PREFLIGHT", result.status);
+            this._field("RUNTIME", result.diagnosis.runtime);
+            this._field("DEPENDENCIES", result.diagnosis.dependencies);
+            this.controls.append(this._button("VIEW REPAIR PLAN", () => this.request("PROJECT_REPAIR", result.repositoryId)));
+            return;
+        }
         if (result.kind === "automation") { this._renderAutomation(result); return; }
         if (result.kind === "project" && result.project) { this._renderProject(result.project); return; }
         if (result.kind === "projects") {
@@ -347,7 +365,7 @@ class ControlPlaneView {
             this._button("RUN", () => this.request("PROJECT_RUN", project.repositoryId)),
             this._button("STOP", () => this.request("PROJECT_STOP", project.repositoryId)),
             this._button("CODE", () => this.request("REPOSITORY_CODE", project.repositoryId)),
-            this._button("INFO", () => this.request("PROJECT_INSPECT", project.repositoryId)));
+            this._button("DIAGNOSE", () => this.request("PROJECT_DIAGNOSE", project.repositoryId)));
     }
 
     _renderAutomation(result) {
@@ -496,6 +514,7 @@ class ControlPlaneView {
             if (application) {
                 actions.append(this._button("INFO", () => this.request("APPLICATION_INFO", id)));
                 if (application.available !== false) actions.append(this._button("OPEN", () => this.request("APPLICATION_OPEN", id)));
+                if (application.type === "external" && application.available === false) actions.append(this._button("REPAIR IDENTITY", () => this.request("APPLICATION_REPAIR", id)));
                 if (application.type === "external") actions.append(this._button("CLOSE", () => this.request("APPLICATION_CLOSE", id)));
                 if (!application.permanent) actions.append(this._button("REMOVE", () => this.request("APPLICATION_REMOVE", id)));
             } else if (catalogEntry && catalogEntry.available) actions.append(this._button("INSTALL", () => this.request("APPLICATION_INSTALL", id)));

@@ -19,6 +19,7 @@ class RepositoryLauncher {
         this.getActiveId = typeof opts.getActiveId === "function" ? opts.getActiveId : (() => null);
         this.onResume = typeof opts.onResume === "function" ? opts.onResume : (() => false);
         this.onselect = typeof opts.onselect === "function" ? opts.onselect : (() => {});
+        this.onprofileselect = opts.onprofileselect || (async () => ({ok: false, status: "PROFILE SELECTION UNAVAILABLE"}));
         this.repositories = [];
         this.status = null;
         this.isOpen = false;
@@ -114,6 +115,31 @@ class RepositoryLauncher {
             this.element.focus({preventScroll: true});
         }
         return true;
+    }
+
+    async selectRunProfile(profileId) {
+        const repository = this._selectedRepository();
+        if (this.busy || !repository || !repository.runProfiles.some(p => p.profileId === profileId)) return false;
+        const restoreFocus = this.document && this.document.activeElement === this.profileSelectElement;
+        this.busy = true;
+        if (this.profileSelectElement) this.profileSelectElement.disabled = true;
+        try {
+            const result = await this.onprofileselect(repository.id, profileId);
+            if (!result || !result.ok) {
+                this.errorMessage = result && result.status || "PROFILE SELECTION FAILED";
+                return false;
+            }
+            this.setRepositories(this.repositories.map(r => r.id === repository.id ? result.repository : r));
+            this.errorMessage = "";
+            return true;
+        } catch (_) {
+            this.errorMessage = "PROFILE SELECTION FAILED";
+            return false;
+        } finally {
+            this.busy = false;
+            if (this.isOpen) this._renderMenu();
+            if (restoreFocus && this.isOpen && this.profileSelectElement) this.profileSelectElement.focus();
+        }
     }
 
     openAdd() {
@@ -462,11 +488,14 @@ class RepositoryLauncher {
         this.summaryElement.className = "repository_action_summary";
         this.footerElement = this.document.createElement("p");
         this.footerElement.className = "repository_action_help";
+        this.profileControlElement = this.document.createElement("label");
+        this.profileControlElement.className = "repository_run_profile";
 
         this.element.append(
             this.titleElement,
             this.promptElement,
             this.cloneFormElement,
+            this.profileControlElement,
             this.actionListElement,
             this.infoElement,
             this.errorElement,
@@ -495,6 +524,7 @@ class RepositoryLauncher {
                 profileId: typeof repository.process.profileId === "string" ? repository.process.profileId.slice(0, 64) : "UNKNOWN",
                 displayName: typeof repository.process.displayName === "string" ? repository.process.displayName.slice(0, 64) : "UNKNOWN",
                 state: repository.process.state,
+                cause: repository.process.diagnosis && typeof repository.process.diagnosis.cause === "string" ? repository.process.diagnosis.cause.slice(0, 80) : "UNKNOWN",
                 startedAt: typeof repository.process.startedAt === "string" ? repository.process.startedAt.slice(0, 64) : null,
                 exitedAt: typeof repository.process.exitedAt === "string" ? repository.process.exitedAt.slice(0, 64) : null,
                 exitCode: Number.isInteger(repository.process.exitCode) ? repository.process.exitCode : null,
@@ -535,6 +565,10 @@ class RepositoryLauncher {
                 backend: typeof execution.backend === "string" ? execution.backend.slice(0, 32) : "UNAVAILABLE"
             },
             process: processState,
+            runProfiles: Array.isArray(repository.runProfiles) ? repository.runProfiles.filter(p => p
+                && typeof p.profileId === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(p.profileId)
+                && typeof p.displayName === "string").map(p => ({profileId: p.profileId, displayName: p.displayName.slice(0, 64)})) : [],
+            selectedRunProfileId: typeof repository.selectedRunProfileId === "string" ? repository.selectedRunProfileId : null,
             actions
         };
     }
@@ -636,6 +670,7 @@ class RepositoryLauncher {
         this.cloneFormElement.hidden = this.view !== "add";
         this.infoElement.hidden = this.view !== "info";
         this.summaryElement.hidden = this.view !== "actions";
+        this.profileControlElement.hidden = this.view !== "actions";
         this.footerElement.textContent = this.view === "info" || this.view === "clone-complete"
             ? "ESC CLOSE"
             : (this.view === "prompt"
@@ -645,6 +680,7 @@ class RepositoryLauncher {
                     : "UP/DOWN SELECT  //  ENTER OPEN  //  ESC CLOSE"));
 
         if (this.view === "actions") {
+            this._renderRunProfiles(repository);
             this._renderList(repository.actions, "action", this.selectedActionIndex,
                 index => this._selectAction(index), entry => this.activate(entry.id));
             this._selectAction(this.selectedActionIndex);
@@ -682,6 +718,7 @@ class RepositoryLauncher {
         }
         if (repository.process) {
             fields.push(["PROCESS", repository.process.state], ["RUN PROFILE", repository.process.displayName]);
+            if (repository.process.state === "FAILED") fields.push(["CAUSE", repository.process.cause]);
         }
         fields.forEach(field => this._appendSummaryLine(field[0], field[1]));
     }
@@ -809,8 +846,42 @@ class RepositoryLauncher {
         if (choice) this.element.setAttribute("aria-activedescendant", `repository_choice_${choice.id}`);
     }
 
+    _renderRunProfiles(repository) {
+        const restoreFocus = this.profileSelectElement && this.document.activeElement === this.profileSelectElement;
+        if (restoreFocus) this._setInputCapture(false);
+        this.profileControlElement.textContent = repository.runProfiles.length ? "RUN PROFILE " : "NO RUN PROFILE";
+        this.profileSelectElement = null;
+        if (!repository.runProfiles.length) return;
+        const select = this.document.createElement("select");
+        select.id = "repository_run_profile";
+        select.setAttribute("aria-label", "RUN PROFILE");
+        if (!repository.selectedRunProfileId) {
+            const placeholder = this.document.createElement("option");
+            placeholder.value = "";
+            placeholder.textContent = "SELECT PROFILE";
+            placeholder.disabled = true;
+            placeholder.selected = true;
+            select.appendChild(placeholder);
+        }
+        repository.runProfiles.forEach(profile => {
+            const option = this.document.createElement("option");
+            option.value = profile.profileId;
+            option.textContent = profile.displayName;
+            option.selected = profile.profileId === repository.selectedRunProfileId;
+            select.appendChild(option);
+        });
+        select.disabled = this.busy;
+        select.addEventListener("focus", () => this._setInputCapture(true));
+        select.addEventListener("blur", () => this._setInputCapture(false));
+        select.addEventListener("change", () => this.selectRunProfile(select.value));
+        this.profileSelectElement = select;
+        this.profileControlElement.appendChild(select);
+        if (restoreFocus && !this.busy) select.focus();
+    }
+
     _handleKeydown(event) {
         if (!this.isOpen) return;
+        if (this.profileSelectElement && event.target === this.profileSelectElement && event.key !== "Escape") return;
         let handled = true;
         if (this.ownsInputTarget(event.target)) {
             if (event.key === "Escape") {

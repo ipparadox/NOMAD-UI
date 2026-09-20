@@ -391,6 +391,7 @@ class RepositoryIsolationService {
 
     _bubblewrapPlan(spec, profileId, backend) {
         const environment = buildRepositoryRunEnvironment(this.environment, {
+            PATH: spec.profile && spec.profile.runtimeBin ? `${spec.profile.runtimeBin}:/usr/local/bin:/usr/bin:/bin` : this.environment.PATH,
             HOME: "/tmp", TMPDIR: "/tmp", XDG_CONFIG_HOME: "/tmp/config",
             XDG_CACHE_HOME: "/tmp/cache", XDG_DATA_HOME: "/tmp/data"
         });
@@ -421,6 +422,7 @@ class RepositoryIsolationService {
         }
         const unitName = `nomad-repository-${spec.repository.id.slice(5)}-${this.randomBytes(6).toString("hex")}.service`;
         const environment = buildRepositoryRunEnvironment(this.environment, {
+            PATH: spec.profile && spec.profile.runtimeBin ? `${spec.profile.runtimeBin}:/usr/local/bin:/usr/bin:/bin` : this.environment.PATH,
             HOME: "/tmp", TMPDIR: "/tmp", XDG_CONFIG_HOME: "/tmp/config",
             XDG_CACHE_HOME: "/tmp/cache", XDG_DATA_HOME: "/tmp/data"
         });
@@ -471,6 +473,7 @@ class RepositoryIsolationService {
             args: spec.args.slice(),
             cwd: spec.repository.canonicalPath,
             env: buildRepositoryRunEnvironment(this.environment, {
+                PATH: spec.profile && spec.profile.runtimeBin ? `${spec.profile.runtimeBin}:/usr/local/bin:/usr/bin:/bin` : this.environment.PATH,
                 HOME: homeDirectory,
                 TMPDIR: tempDirectory,
                 XDG_CONFIG_HOME: configDirectory,

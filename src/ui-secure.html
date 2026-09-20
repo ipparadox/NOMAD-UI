@@ -53,28 +53,50 @@
     <body class="solidBackground nomad-login-active">
         <section id="boot_screen" class="nomad-login" aria-label="NOMAD session confirmation">
             <canvas id="ascii" aria-hidden="true"></canvas>
-            <div class="nomad-login-shade"></div>
-            <header class="nomad-login-header"><div><div class="nomad-login-label">NODE</div><span data-login-node>UNKNOWN</span></div><div><div class="nomad-login-label">LOCAL TIME</div><time data-login-time>UNKNOWN</time></div></header>
-            <div class="nomad-login-scan" aria-hidden="true"></div>
-            <div class="nomad-login-center">
-                <h1>NOMAD</h1>
-                <div class="nomad-login-subtitle">SECURE FIELD TERMINAL</div>
-                <div class="nomad-login-label">OPERATOR // SESSION CONFIRMATION</div>
-                <div class="nomad-login-identity"><div class="nomad-login-label">OS IDENTITY</div><span data-login-operator>UNKNOWN</span></div>
-                <div data-login-session>INITIALIZING SESSION PROVIDER</div>
-                <p class="nomad-login-notice">Continue into your existing OS session.<br>This confirmation does not lock or re-authenticate the computer.</p>
-                <button type="button" disabled>[ ENTER NOMAD ]</button>
-                <div data-login-status role="status" aria-live="polite">INITIALIZING SECURE RENDERER</div>
+            <div class="nomad-login-shade" aria-hidden="true"></div>
+            <div class="nomad-login-frame" aria-hidden="true"></div>
+            <header class="nomad-login-header">
+                <div class="nomad-login-command">
+                    <span class="nomad-login-insignia" aria-hidden="true">✦</span>
+                    <div><strong>U.S. ARMY</strong><span>SECURE FIELD SYSTEMS</span><small>TACTICAL NETWORK // NOMAD</small></div>
+                </div>
+                <div class="nomad-login-metadata">
+                    <div class="nomad-login-classification">RESTRICTED // LOCAL SESSION</div>
+                    <dl><dt>SYS ID</dt><dd data-login-node>AWAITING IDENTITY</dd><dt>VER</dt><dd data-login-version>NOT REPORTED</dd><dt>BLD</dt><dd>LOCAL</dd><dt>SITE</dt><dd>OS SESSION</dd></dl>
+                </div>
+            </header>
+            <div class="nomad-login-stage">
+                <div class="nomad-login-center" aria-labelledby="nomad-login-title">
+                    <div class="nomad-login-card-rail"><span>ACCESS CONTROL // 01</span><span class="nomad-login-indicator">LOCAL SESSION</span></div>
+                    <div class="nomad-login-brand"><h1 id="nomad-login-title">NOMAD</h1><div class="nomad-login-subtitle">SECURE<br>FIELD TERMINAL<span>OPERATOR INTERFACE</span></div></div>
+                    <div class="nomad-login-section-heading"><span>OPERATOR // SESSION CREDENTIALS</span><span aria-hidden="true">01—A</span></div>
+                    <div class="nomad-login-identity">
+                        <div><div class="nomad-login-label">OS IDENTITY</div><span data-login-operator>AWAITING IDENTITY</span></div>
+                        <span class="nomad-login-identity-mark" aria-hidden="true">ID<span>LOCAL</span></span>
+                    </div>
+                    <div class="nomad-login-auth">
+                        <div class="nomad-login-label">AUTHENTICATION <span class="nomad-login-auth-type">OS SESSION</span></div>
+                        <div data-login-session>READING SESSION PROVIDER</div>
+                        <p class="nomad-login-notice">Access is reserved for authorized operators. Continue into your existing OS session; this confirmation does not lock or re-authenticate the computer.</p>
+                    </div>
+                    <button type="button" disabled>[ ENTER NOMAD ]</button>
+                    <div data-login-status role="status" aria-live="polite">INITIALIZING SECURE RENDERER</div>
+                    <div class="nomad-login-card-footer"><strong>AUTHORIZED OPERATORS ONLY</strong><span>UNAUTHORIZED ACCESS IS PROHIBITED</span><div><span>AUTH CHANNEL // <span data-login-channel>UNVERIFIED</span></span><span>SESSION / LOCAL</span></div></div>
+                </div>
             </div>
-            <div class="nomad-login-checks">
-                <div>SECURE RENDERER<span data-login-renderer>UNKNOWN</span></div>
-                <div>SECURITY PROFILE<span data-login-profile>UNKNOWN</span></div>
-                <div>CONTROL PLANE<span data-login-control>UNKNOWN</span></div>
-                <div>TERMINAL<span data-login-terminal>UNKNOWN</span></div>
-                <div>REPOSITORIES<span data-login-repositories>UNKNOWN</span></div>
-                <div>TELEMETRY / NETWORK<span data-login-telemetry>UNKNOWN / UNKNOWN</span></div>
+            <aside class="nomad-login-access"><span class="nomad-login-label">ACCESS SCOPE / 01</span><strong>LOCAL OPERATOR ACCESS</strong><span>SESSION CONFIRMATION REQUIRED</span></aside>
+            <div class="nomad-login-bottom">
+                <div class="nomad-login-checks" aria-label="Workstation readiness">
+                    <div><div class="nomad-login-label">SECURE REGION</div><span data-login-renderer>VERIFYING RENDERER</span></div>
+                    <div><div class="nomad-login-label">SECURITY PROFILE</div><span data-login-profile>READING POLICY</span></div>
+                    <div><div class="nomad-login-label">CONTROL PLANE</div><span data-login-control>AWAITING ENTRY</span></div>
+                    <div><div class="nomad-login-label">THREAT STATUS</div><span>NOT ASSESSED</span></div>
+                    <div><div class="nomad-login-label">REPOSITORIES</div><span data-login-repositories>AWAITING ENTRY</span></div>
+                    <div><div class="nomad-login-label">TELEMETRY</div><span data-login-telemetry>AWAITING ENTRY</span></div>
+                    <div><div class="nomad-login-label">NETWORK</div><span data-login-network>AWAITING ENTRY</span></div>
+                </div>
+                <footer class="nomad-login-footer"><span class="nomad-login-footer-code"><i aria-hidden="true"></i>NMD // FIELD INTERFACE<span>TERMINAL / <span data-login-terminal>STANDBY</span></span></span><span>LOCAL TIME <time data-login-time>--:--:--</time></span></footer>
             </div>
-            <footer class="nomad-login-footer"><span>AUTH CHANNEL // <span data-login-channel>UNKNOWN</span></span><span>LOCAL OPERATOR ACCESS</span></footer>
         </section>
         <script src="_renderer_secure.js"></script>
     </body>

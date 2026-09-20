@@ -101,6 +101,13 @@ const api = {
         cancelClone() {
             return ipcRenderer.invoke("repository-operation", {operation: "cancel-clone"});
         },
+        selectRunProfile(repositoryId, profileId) {
+            if (typeof repositoryId !== "string" || !/^repo_[a-f0-9]{32}$/.test(repositoryId)
+                || typeof profileId !== "string" || !REPOSITORY_PROFILE_PATTERN.test(profileId)) {
+                return Promise.resolve({ok: false, status: "INVALID REQUEST"});
+            }
+            return ipcRenderer.invoke("repository-operation", {operation: "select-run-profile", repositoryId, profileId});
+        },
         action(request) {
             if (!plainObject(request) || Object.keys(request).some(key => ![
                 "repositoryId", "actionId", "geometry", "profileId", "authorizationId", "authorization"

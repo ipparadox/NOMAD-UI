@@ -209,9 +209,9 @@ class RepositoryProcessManager {
             let remaining = 65536;
             let closed = false;
             child.once("close", () => { closed = true; this._closeDescriptor(log.descriptor); });
-            [child.stdout, child.stderr].forEach(stream => {
+            [child.stdout, child.stderr].forEach((stream, streamIndex) => {
                 if (stream) stream.on("data", chunk => {
-                    profile.boundedOutput(chunk);
+                    profile.boundedOutput(chunk, streamIndex === 0 ? "stdout" : "stderr");
                     if (closed || remaining <= 0) return;
                     const bounded = chunk.subarray(0, remaining);
                     try { this.fs.writeSync(log.descriptor, bounded); remaining -= bounded.length; }
@@ -360,6 +360,7 @@ class RepositoryProcessManager {
             exitedAt: record.exitedAt,
             exitCode: record.exitCode,
             signal: record.signal,
+            diagnosis: record.diagnosis || null,
             securityProfile: record.securityProfile,
             isolationLevel: record.isolationLevel,
             isolationBackend: record.isolationBackend

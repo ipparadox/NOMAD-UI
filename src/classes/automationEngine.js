@@ -54,6 +54,7 @@ class AutomationEngine {
     }
     _setupSteps(inspected, enableLifecycle) {
         const steps = copy(inspected.steps);
+        if (steps.length > require("./repairRuleRegistry.js").REPAIR_LIMITS.maxSetupSteps) throw new Error("REPAIR STEP LIMIT EXCEEDED");
         if (enableLifecycle) {
             if (inspected.type !== "NODE") throw new Error("LIFECYCLE MODE REQUIRES NODE PROJECT");
             steps.forEach(step => { step.args = step.args.filter(arg => !["--ignore-scripts", "--mode=skip-builds"].includes(arg)); });
@@ -67,12 +68,17 @@ class AutomationEngine {
         if (!this.pathPolicyAllows(this.profile()) || !policy.allowed || policy.level !== "STRONG" || !["NORMAL", "PUBLIC"].includes(this.profile())) return {ok: false, status: "SETUP BLOCKED / VERIFIED STRONG ISOLATION REQUIRED"};
         if (this.processes.isActive(id) || this.active(id)) return {ok: false, status: "PROJECT OPERATION ALREADY RUNNING"};
         if (["ERROR", "BLOCKED", "UNSUPPORTED"].includes(inspected.state)) return {ok: false, status: inspected.blocked || inspected.state};
+        let runtime = null;
+        if (this.doctor && inspected.type === "NODE") {
+            runtime = await this.doctor.runtime.resolve(require("./projectAdapters.js").readInputs(repository));
+            if (!runtime.ok) return {ok: false, status: runtime.status};
+        }
         const token = crypto.randomBytes(24).toString("hex");
         const generatedLockfile = inspected.lockfile === "NONE" ? ({NPM: "package-lock.json", PNPM: "pnpm-lock.yaml", YARN: "yarn.lock", CARGO: "Cargo.lock"}[inspected.manager] || null) : null;
-        const stored = {id, identity: repository.executionIdentity, fingerprint: inspected.fingerprint, inputFingerprints: inspected.inputFingerprints, generatedLockfile, profile: this.profile(), steps: this._setupSteps(inspected, enableLifecycle), enableLifecycle, expires: Date.now() + 120000};
+        const stored = {id, runtime, identity: repository.executionIdentity, fingerprint: inspected.fingerprint, inputFingerprints: inspected.inputFingerprints, generatedLockfile, profile: this.profile(), steps: this._setupSteps(inspected, enableLifecycle), enableLifecycle, expires: Date.now() + 120000};
         this.plans.set(token, stored);
         while (this.plans.size > 128) this.plans.delete(this.plans.keys().next().value);
-        return {confirmation: {request: "AUTHORIZE PROJECT SETUP", target: repository.public.displayName, securityProfile: stored.profile, privilege: "NONE", effects: [...stored.steps.map(s => s.type.replace(/_/g, " ")), "VERIFY RESULT", "REGISTER PROJECT", "NO AUTOMATIC DEPENDENCY ROLLBACK"], fields: [{label: "TYPE", value: inspected.type}, {label: "PACKAGE MANAGER", value: inspected.manager}, {label: "DEPENDENCIES", value: inspected.lockfile}, {label: "EXECUTION RISK", value: enableLifecycle ? "REPOSITORY AND DEPENDENCY LIFECYCLE SCRIPTS WILL BE ENABLED; ARBITRARY REPOSITORY CODE MAY EXECUTE" : inspected.risk}, {label: "NODE LIFECYCLES", value: inspected.type === "NODE" ? enableLifecycle ? "ENABLED BY THIS EXPLICIT AUTHORIZATION" : "REQUESTED DISABLED; PROJECTS NEEDING BUILD HOOKS CAN AUTHORIZE PREPARE + HOOKS" : "NOT APPLICABLE"}, {label: "DECLARED HOOKS", value: inspected.hooks || "NONE"}, {label: "FINGERPRINT", value: inspected.fingerprint}, {label: "ISOLATION", value: "STRONG / REPOSITORY WRITABLE / NETWORK FOR INSTALL OR BUILD ONLY / HOST HOME AND CREDENTIAL ENV HIDDEN"}, {label: "CREDENTIALS", value: "AUTOMATIC SECRET EXPOSURE REFUSED"}]}, stored: {automationPlan: token}};
+        return {confirmation: {request: "AUTHORIZE PROJECT SETUP", target: repository.public.displayName, securityProfile: stored.profile, privilege: "NONE", effects: [...stored.steps.map(s => s.type.replace(/_/g, " ")), "VERIFY RESULT", "REGISTER PROJECT", "NO AUTOMATIC DEPENDENCY ROLLBACK"], fields: [{label: "PROJECT RUNTIME", value: runtime ? runtime.selected.version : inspected.runtime}, {label: "TYPE", value: inspected.type}, {label: "PACKAGE MANAGER", value: inspected.manager}, {label: "DEPENDENCIES", value: inspected.lockfile}, {label: "EXECUTION RISK", value: enableLifecycle ? "REPOSITORY AND DEPENDENCY LIFECYCLE SCRIPTS WILL BE ENABLED; ARBITRARY REPOSITORY CODE MAY EXECUTE" : inspected.risk}, {label: "NODE LIFECYCLES", value: inspected.type === "NODE" ? enableLifecycle ? "ENABLED BY THIS EXPLICIT AUTHORIZATION" : "REQUESTED DISABLED; PROJECTS NEEDING BUILD HOOKS CAN AUTHORIZE PREPARE + HOOKS" : "NOT APPLICABLE"}, {label: "DECLARED HOOKS", value: inspected.hooks || "NONE"}, {label: "FINGERPRINT", value: inspected.fingerprint}, {label: "ISOLATION", value: "STRONG / REPOSITORY WRITABLE / NETWORK FOR INSTALL OR BUILD ONLY / HOST HOME AND CREDENTIAL ENV HIDDEN"}, {label: "CREDENTIALS", value: "AUTOMATIC SECRET EXPOSURE REFUSED"}]}, stored: {automationPlan: token}};
     }
     shutdown() { this.plans.clear(); this.operations.forEach(o => { if (o.state === "RUNNING") o.cancelled = true; }); }
     active(id) { return Array.from(this.operations.values()).find(o => o.repositoryId === id && o.state === "RUNNING"); }
@@ -111,7 +117,8 @@ class AutomationEngine {
             operation.steps[index].state = "RUNNING";
             operation.status = plan.steps[index].type.replace(/_/g, " ");
             this._emit(operation);
-            this.processes.start(repository, {...plan.steps[index], boundedOutput: chunk => {
+            const step = plan.runtime ? this.doctor.runtime.bind(plan.steps[index], plan.runtime) : plan.steps[index];
+            this.processes.start(repository, {...step, boundedOutput: chunk => {
                 operation.log = (operation.log + chunk.toString("utf8")).slice(-65536);
             }});
             const state = await this._wait(operation, plan.profile);
@@ -124,6 +131,7 @@ class AutomationEngine {
         operation.steps[plan.steps.length].state = "RUNNING";
         this._emit(operation);
         const inspected = this.inspectAdapter(repository);
+        if (this.doctor && inspected.type === "NODE" && require("./launchDoctor.js").dependencyState(repository, require("./projectAdapters.js").readInputs(repository)) !== "READY") throw new Error("VERIFICATION FAILED");
         if (inspected.blocked || inspected.state === "UNSUPPORTED") throw new Error("VERIFICATION FAILED");
         if (inspected.fingerprint !== plan.fingerprint) {
             // An install may create its missing lockfile. Existing inputs, new config,
@@ -136,6 +144,14 @@ class AutomationEngine {
         this.ready.set(plan.id, {identity: repository.executionIdentity, fingerprint: inspected.fingerprint});
         operation.steps[plan.steps.length + 1].state = "SUCCESS";
         this._finish(operation, "SUCCESS", "PROJECT READY / RUN AUTHORIZATION REMAINS SEPARATE");
+        if (operation.afterSuccess && !operation.cancelled) {
+            try {
+                const launch = await operation.afterSuccess();
+                operation.status = launch.status;
+                operation.state = launch.ok ? "SUCCESS" : "FAILED";
+                this._emit(operation);
+            } catch (_) { this._finish(operation, "FAILED", "RUN FAILED / MANUAL REVIEW REQUIRED"); }
+        }
     }
     _wait(operation, profile) {
         return new Promise((resolve, reject) => {

@@ -65,6 +65,25 @@ app.on("browser-window-created", (event, win) => {
             assert(await read("document.body.classList.contains('nomad-login-active') && !document.getElementById('nomad_secure_bootstrap_status')"));
             assert(await read("document.activeElement === window.nomadLogin.button"), "keyboard-first focus");
             assert(await firstVisible, "first visible window contains painted waves and no terminal");
+            await read("document.fonts.ready");
+            assert(await read(`(() => {
+                const card = document.querySelector('.nomad-login-center').getBoundingClientRect();
+                const strip = document.querySelector('.nomad-login-checks').getBoundingClientRect();
+                const button = window.nomadLogin.button.getBoundingClientRect();
+                return card.width <= 448 && card.left >= 0 && card.right <= innerWidth
+                    && card.top > 0 && card.bottom < strip.top && button.bottom < card.bottom
+                    && document.querySelectorAll('.nomad-login-checks > div').length === 7
+                    && document.querySelector('[data-login-operator]').textContent !== 'AWAITING IDENTITY'
+                    && document.querySelector('[data-login-control]').textContent === 'AWAITING ENTRY'
+                    && document.querySelector('[data-login-network]').textContent === 'AWAITING ENTRY';
+            })()`), "tactical login has a compact balanced card and truthful seven-module readiness strip");
+            assert(await read("getComputedStyle(document.querySelector('.nomad-login-shade')).pointerEvents === 'none'"), "shade never intercepts pointer input");
+            await read(`window.originalShade = document.querySelector('.nomad-login-shade').style.background;
+                document.querySelector('.nomad-login-shade').style.background = 'radial-gradient(ellipse 370px 350px at 50% 47%, #050505fa 0%, #050505eb 55%, #05050590 78%, transparent 100%)'`);
+            await sleep(150);
+            fs.writeFileSync("/tmp/nomad-login-before-v067.png", (await win.webContents.capturePage()).toPNG());
+            await read("document.querySelector('.nomad-login-shade').style.background = window.originalShade");
+            await sleep(150);
             const loginStart = await read("window.nomadLogin.wave.frames");
             const firstCanvas = await read("document.getElementById('ascii').toDataURL()");
             fs.writeFileSync("/tmp/nomad-login.png", (await win.webContents.capturePage()).toPNG());
@@ -89,6 +108,19 @@ app.on("browser-window-created", (event, win) => {
             assert(await read("Array.from(window.loginCharacters).every(ch => ' nomad-UI'.includes(ch)) && window.loginCharacters.size > 3"));
             assert(await read("window.nomadLogin.state === 'AUTH_READY' && !window.term"), "no timed auto-unlock");
             console.log(`LOGIN OBSERVATION PASS: 20 seconds, ${frameCount} frames (${(frameCount / 20).toFixed(1)} FPS), live pixels, exact character set, focused confirmation, no premature terminal`);
+            win.webContents.setZoomFactor(1.25);
+            await sleep(300);
+            const scaledLayout = await read(`(() => {
+                const card = document.querySelector('.nomad-login-center').getBoundingClientRect();
+                const strip = document.querySelector('.nomad-login-checks').getBoundingClientRect();
+                return {left: card.left, right: card.right, top: card.top, bottom: card.bottom, stripTop: strip.top, width: innerWidth, height: innerHeight};
+            })()`);
+            fs.writeFileSync("/tmp/nomad-login-scaled.png", (await win.webContents.capturePage()).toPNG());
+            assert(scaledLayout.left >= 0 && scaledLayout.right <= scaledLayout.width
+                && scaledLayout.top > 0 && scaledLayout.bottom < scaledLayout.stripTop,
+            `login remains balanced at 125% display scaling: ${JSON.stringify(scaledLayout)}`);
+            win.webContents.setZoomFactor(1);
+            await sleep(300);
             win.webContents.sendInputEvent({type: "keyDown", keyCode: "Return"});
             win.webContents.sendInputEvent({type: "keyUp", keyCode: "Return"});
             let transitionCaptured = false;

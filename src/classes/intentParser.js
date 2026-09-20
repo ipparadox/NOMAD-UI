@@ -69,6 +69,8 @@ class DeterministicIntentParser {
             {actionId: "PROJECT_SETUP", phrases: ["instala las dependencias", "install dependencies"]},
             {actionId: "PROJECT_INSPECT", phrases: ["que necesita este repo", "what does this repo need"]},
             {actionId: "PROJECT_PULL_RUN", phrases: ["haz pull y ejecutalo", "pull and run this repo"]},
+            {actionId: "PROJECT_DIAGNOSE", phrases: ["diagnostica este repo", "por que no arranca", "diagnose this repo"]},
+            {actionId: "PROJECT_REPAIR", phrases: ["repara este repo", "arregla este repo", "repair this repo"]},
             {actionId: "PROJECT_RUN", phrases: ["corre este repo", "ejecuta este repo", "run this repo"]},
             {actionId: "PROJECT_STOP", phrases: ["para este repo", "deten este repo", "stop this repo"]},
             {actionId: "REPOSITORY_CODE", phrases: ["abre este repo en code", "open this repo in code"]},
