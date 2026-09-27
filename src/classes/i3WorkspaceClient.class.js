@@ -11,11 +11,20 @@ class I3WorkspaceClient {
         this.pendingRequests = {};
         this.activeExternalId = null;
         this._geometryTimer = null;
-        this.ipc.on("window-manager-state", (event, result) => this._apply(result));
-        this.ipc.on("window-manager-geometry-changed", () => this.scheduleGeometry());
+        this._onState = (event, result) => this._apply(result);
+        this._onGeometry = () => this.scheduleGeometry();
+        this._subscriptions = [this.ipc.on("window-manager-state", this._onState),
+            this.ipc.on("window-manager-geometry-changed", this._onGeometry)];
     }
 
     initialize() {
+        if (this.destroyed) return Promise.resolve([]);
+        if (this.initialization) return this.initialization;
+        this.initialization = this._initialize();
+        return this.initialization;
+    }
+
+    _initialize() {
         this.manager.setOperationHandler("launch", slot => {
             this.activeExternalId = slot.id;
             this.manager.update(slot.id, {status: "LAUNCHING APPLICATION"});
@@ -50,7 +59,8 @@ class I3WorkspaceClient {
             this._send(enabled ? "fullscreen" : "unfullscreen", slot.id, this.geometry());
             return true;
         });
-        window.addEventListener("resize", () => this.scheduleGeometry());
+        this._onResize = () => this.scheduleGeometry();
+        window.addEventListener("resize", this._onResize);
         if (window.ResizeObserver) {
             this.observer = new ResizeObserver(() => this.scheduleGeometry());
             this.observer.observe(this.viewport);
@@ -65,6 +75,20 @@ class I3WorkspaceClient {
             this.log("warn", "managed application snapshot unavailable");
             return [];
         });
+    }
+
+    destroy() {
+        if (this.destroyed) return;
+        this.destroyed = true;
+        clearTimeout(this._geometryTimer);
+        if (this.observer) this.observer.disconnect();
+        window.removeEventListener("resize", this._onResize);
+        this._subscriptions.forEach(unsubscribe => { if (typeof unsubscribe === "function") unsubscribe(); });
+        if (typeof this.ipc.removeListener === "function") {
+            this.ipc.removeListener("window-manager-state", this._onState);
+            this.ipc.removeListener("window-manager-geometry-changed", this._onGeometry);
+        }
+        this.pendingRequests = {};
     }
 
     geometry() {
@@ -86,6 +110,7 @@ class I3WorkspaceClient {
     }
 
     scheduleGeometry() {
+        if (this.destroyed) return;
         clearTimeout(this._geometryTimer);
         this._geometryTimer = setTimeout(() => {
             if (this.activeExternalId) this._send("geometry", this.activeExternalId, this.geometry());
@@ -101,13 +126,20 @@ class I3WorkspaceClient {
     }
 
     _send(operation, appId, geometry) {
+        if (this.destroyed) return;
+        const now = Date.now();
+        Object.keys(this.pendingRequests).forEach(id => {
+            if (now - this.pendingRequests[id].sentAt > 10000) delete this.pendingRequests[id];
+        });
+        const ids = Object.keys(this.pendingRequests);
+        if (ids.length >= 128) delete this.pendingRequests[ids[0]];
         const requestId = ++this.requestId;
-        this.pendingRequests[requestId] = {operation, appId};
+        this.pendingRequests[requestId] = {operation, appId, sentAt: now};
         this.ipc.send("window-manager-operation", {requestId, operation, appId, geometry});
     }
 
     _apply(result) {
-        if (!result || !result.appId) return;
+        if (this.destroyed || !result || !result.appId) return;
         const pending = this.pendingRequests[result.requestId] || null;
         if (pending) delete this.pendingRequests[result.requestId];
         if (result.appId === "terminal") {

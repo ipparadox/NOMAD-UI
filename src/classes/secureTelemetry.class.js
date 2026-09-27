@@ -1,5 +1,9 @@
 "use strict";
 
+function nomadPanelsVisible() {
+    return !document.hidden && !document.body.classList.contains("nomad-login-active");
+}
+
 function nomadFinite(value) {
     return Number.isFinite(value) ? value : null;
 }
@@ -25,7 +29,8 @@ function nomadPrettyBytes(value) {
 
 function nomadSetText(id, value, fallback) {
     const element = document.getElementById(id);
-    if (element) element.textContent = nomadText(value, fallback);
+    const text = nomadText(value, fallback);
+    if (element && element.textContent !== text) element.textContent = text;
 }
 
 function nomadAverage(values) {
@@ -43,6 +48,12 @@ async function nomadInitialTelemetry(bridge, status) {
     } catch (error) {
         return {ok: false, status, sequence: 0, timestamp: Date.now()};
     } finally { clearTimeout(timer); }
+}
+
+// Smoothie prunes during rendering; hidden charts still receive samples.
+function nomadAppendSample(series, time, value) {
+    series.append(time, value);
+    if (series.data.length > 600) series.data.splice(0, series.data.length - 600);
 }
 
 class SecureClock {
@@ -110,6 +121,7 @@ class SecureSystemTelemetry {
     }
 
     apply(snapshot) {
+        if (this.disposed) return false;
         if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return false;
         const sequence = Number.isSafeInteger(snapshot.sequence) ? snapshot.sequence : this.lastSequence + 1;
         if (sequence <= this.lastSequence) return false;
@@ -289,11 +301,11 @@ class SecureSystemTelemetry {
         const coreCount = Number.isSafeInteger(cpu.cores) && cpu.cores > 0 ? cpu.cores : loads.length;
         this._ensureCpuCharts(coreCount);
         this.dataAvailable = loads.some(Number.isFinite);
-        this.cpuCharts.forEach(chart => this.dataAvailable && !document.hidden ? chart.start() : chart.stop());
+        this.cpuCharts.forEach(chart => this.dataAvailable && nomadPanelsVisible() ? chart.start() : chart.stop());
         const sampleTime = Number.isFinite(timestamp) ? timestamp : Date.now();
         this.cpuSeries.forEach((series, index) => {
             const value = Number.isFinite(loads[index]) ? Math.max(0, Math.min(100, loads[index])) : null;
-            if (value !== null) series.append(sampleTime, value);
+            if (value !== null) nomadAppendSample(series, sampleTime, value);
         });
         if (this.cpuSeries.length && loads.some(Number.isFinite)) {
             document.body.dataset.nomadCpuGraphTimestamp = String(sampleTime);
@@ -517,6 +529,7 @@ class SecureLocationGlobe {
         this.connectionPins = new Map();
         this.endpointKey = null;
         this.frame = null;
+        this.visible = nomadPanelsVisible();
         this.lastTick = 0;
         this.initialized = false;
         this.pendingSnapshot = null;
@@ -536,8 +549,8 @@ class SecureLocationGlobe {
             };
             try {
                 const placeholder = document.getElementById("mod_globe_canvas_placeholder");
-                const width = Math.max(160, placeholder.offsetWidth || this.container.offsetWidth || 160);
-                const height = Math.max(120, placeholder.offsetHeight || width);
+                const width = Math.max(1, placeholder.offsetWidth || this.container.offsetWidth || 160);
+                const height = Math.max(1, placeholder.offsetHeight || width);
                 const globeTheme = this.theme.globe || {};
                 this.globe = new window.ENCOM.Globe(width, height, {
                     font: this.theme.cssvars && this.theme.cssvars.font_main,
@@ -557,7 +570,7 @@ class SecureLocationGlobe {
                 });
                 placeholder.replaceWith(this.globe.domElement);
                 this.globe.init(this.theme.colors && this.theme.colors.light_black || "#101010", () => {
-                    if (settled) return;
+                    if (settled || this.disposed) return;
                     clearTimeout(this.initTimer);
                     this.initialized = true;
                     this._startAnimation();
@@ -625,8 +638,10 @@ class SecureLocationGlobe {
     resize() {
         if (!this.globe || !this.globe.domElement) return false;
         const canvas = this.globe.domElement;
-        const width = Math.max(160, canvas.parentElement ? canvas.parentElement.offsetWidth : canvas.offsetWidth);
-        const height = Math.max(120, canvas.offsetHeight || width);
+        // Match the CSS rectangle even below the old 160x120 minimum; otherwise
+        // a short scaled viewport stretches the globe independently on each axis.
+        const width = Math.max(1, canvas.offsetWidth || (canvas.parentElement && canvas.parentElement.offsetWidth) || 160);
+        const height = Math.max(1, canvas.offsetHeight || width);
         if (this.globe.camera) {
             this.globe.camera.aspect = width / height;
             this.globe.camera.updateProjectionMatrix();
@@ -635,8 +650,28 @@ class SecureLocationGlobe {
         return true;
     }
 
+    setVisible(visible) {
+        this.visible = visible;
+        if (!visible) {
+            cancelAnimationFrame(this.frame);
+            this.frame = null;
+        } else if (this.initialized && !this.disposed) this._startAnimation();
+    }
+
+    dispose() {
+        if (this.disposed) return;
+        this.disposed = true;
+        this.setVisible(false);
+        clearTimeout(this.initTimer);
+        if (this.resizeHandler) window.removeEventListener("resize", this.resizeHandler);
+        this._removeEndpoint();
+        this._syncConnectionPins([]);
+        if (this.globe && this.globe.renderer) this.globe.renderer.dispose();
+        this.pendingSnapshot = null;
+    }
+
     _startAnimation() {
-        if (this.frame) return;
+        if (this.frame || this.disposed || this.visible === false) return;
         const tick = timestamp => {
             if (!document.hidden && timestamp - this.lastTick >= 33 && this.globe) {
                 try { this.globe.tick(); }
@@ -647,6 +682,7 @@ class SecureLocationGlobe {
                     return;
                 }
                 this.lastTick = timestamp;
+                this.lastPaintAt = Date.now();
                 document.body.dataset.nomadGlobeTick = String(Math.floor(timestamp));
             }
             this.frame = requestAnimationFrame(tick);
@@ -720,6 +756,7 @@ class SecureNetworkTelemetry {
     }
 
     apply(snapshot) {
+        if (this.disposed) return false;
         if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return false;
         const sequence = Number.isSafeInteger(snapshot.sequence) ? snapshot.sequence : this.lastSequence + 1;
         if (sequence <= this.lastSequence) return false;
@@ -816,9 +853,9 @@ class SecureNetworkTelemetry {
         const tx = Number.isFinite(traffic.tx_sec) ? traffic.tx_sec : null;
         const rx = Number.isFinite(traffic.rx_sec) ? traffic.rx_sec : null;
         if (this.trafficSeries && tx !== null && rx !== null) {
-            this.trafficCharts.forEach(chart => document.hidden ? chart.stop() : chart.start());
-            this.trafficSeries[0].append(timestamp, tx / 125000);
-            this.trafficSeries[1].append(timestamp, -rx / 125000);
+            this.trafficCharts.forEach(chart => nomadPanelsVisible() ? chart.start() : chart.stop());
+            nomadAppendSample(this.trafficSeries[0], timestamp, tx / 125000);
+            nomadAppendSample(this.trafficSeries[1], timestamp, -rx / 125000);
             const maximumUp = this.trafficSeries[0].maxValue;
             const maximumDown = -this.trafficSeries[1].minValue;
             if (maximumUp > maximumDown) this.trafficSeries[1].minValue = -maximumUp;
@@ -841,7 +878,12 @@ class SecureTelemetryDashboard {
         this.log = typeof opts.log === "function" ? opts.log : (() => {});
     }
 
-    async initialize() {
+    initialize() {
+        if (!this.initialization) this.initialization = this._initialize();
+        return this.initialization;
+    }
+
+    async _initialize() {
         const left = document.getElementById("mod_column_left");
         const right = document.getElementById("mod_column_right");
         if (!left || !right) throw new Error("Telemetry columns unavailable");
@@ -871,9 +913,13 @@ class SecureTelemetryDashboard {
         }));
         this.activatePanels();
         const [system, network] = await Promise.all([systemReady, networkReady]);
+        if (this.disposed) return {system, network};
         this.watchdog = setInterval(() => this.checkFreshness(), 5000);
-        document.addEventListener("visibilitychange", () => this.checkFreshness());
-        window.addEventListener("beforeunload", () => this.dispose(), {once: true});
+        this._onVisibility = () => this.checkFreshness();
+        this._onUnload = () => this.dispose();
+        document.addEventListener("visibilitychange", this._onVisibility);
+        window.addEventListener("beforeunload", this._onUnload, {once: true});
+        this.checkFreshness();
         window.mods = {
             clock: this.clock,
             sysinfo: this.system,
@@ -889,12 +935,32 @@ class SecureTelemetryDashboard {
     }
 
     checkFreshness() {
+        if (this.disposed) return;
+        const visible = !document.hidden && !document.body.classList.contains("nomad-login-active");
+        if (this.network && this.network.globe) this.network.globe.setVisible(visible);
         [this.system, this.network].forEach(view => {
             if (!view) return;
             const stale = !view.lastReceived || Date.now() - view.lastReceived > 10000;
             const charts = view.cpuCharts || view.trafficCharts || [];
-            charts.forEach(chart => document.hidden || stale || !view.dataAvailable ? chart.stop() : chart.start());
+            charts.forEach(chart => !visible || stale || !view.dataAvailable ? chart.stop() : chart.start());
             if (!stale) return;
+            // One read-only recovery attempt per dashboard lifetime; no restart loop.
+            if (!view.recoveryAttempted) {
+                view.recoveryAttempted = true;
+                try {
+                    if (view.unsubscribe) view.unsubscribe();
+                    view.unsubscribe = null;
+                    view.lastSequence = -1;
+                    view.unsubscribe = view.bridge.subscribeTelemetry(snapshot => {
+                        if (!this.disposed) view.apply(snapshot);
+                    });
+                    nomadInitialTelemetry(view.bridge, "TELEMETRY UNAVAILABLE").then(snapshot => {
+                        if (!this.disposed) view.apply(snapshot);
+                    });
+                } catch (_) {
+                    this.log("warn", "Telemetry recovery unavailable; automatic retry budget exhausted");
+                }
+            }
             const system = view === this.system;
             view.statusElement.textContent = system ? "SYSTEM TELEMETRY UNAVAILABLE" : "NETWORK TELEMETRY UNAVAILABLE";
             view.statusElement.hidden = false;
@@ -905,16 +971,22 @@ class SecureTelemetryDashboard {
     }
 
     dispose() {
+        if (this.disposed) return;
+        this.disposed = true;
         clearInterval(this.watchdog);
+        document.removeEventListener("visibilitychange", this._onVisibility);
+        window.removeEventListener("beforeunload", this._onUnload);
+        (this.panelTimers || []).forEach(clearTimeout);
+        if (this.system) this.system.closeProcessList();
         if (this.clock) clearInterval(this.clock.updater);
         [this.system, this.network].forEach(view => {
             if (!view) return;
+            view.disposed = true;
             if (view.unsubscribe) view.unsubscribe();
             (view.cpuCharts || view.trafficCharts || []).forEach(chart => chart.stop());
         });
         if (this.network && this.network.globe) {
-            cancelAnimationFrame(this.network.globe.frame);
-            clearTimeout(this.network.globe.initTimer);
+            this.network.globe.dispose();
         }
     }
 
@@ -923,12 +995,13 @@ class SecureTelemetryDashboard {
         const left = Array.from(document.querySelectorAll("#mod_column_left > div, #mod_column_left > p.nomad_module_status"));
         const right = Array.from(document.querySelectorAll("#mod_column_right > div, #mod_column_right > p.nomad_module_status"));
         const count = Math.max(left.length, right.length);
+        this.panelTimers = [];
         for (let index = 0; index < count; index++) {
-            setTimeout(() => {
+            this.panelTimers.push(setTimeout(() => {
                 if (left[index]) left[index].style.animationPlayState = "running";
                 if (right[index]) right[index].style.animationPlayState = "running";
                 if (left[index] || right[index]) window.audioManager.panels.play();
-            }, index * 250);
+            }, index * 250));
         }
         document.body.dataset.nomadPanelAnimation = "STARTED";
     }

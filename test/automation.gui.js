@@ -54,7 +54,7 @@ function fixture(root) {
         runProfiles.discover(repository).forEach(p => runProfiles.approve(repository, p));
     }};
 }
-async function acceptance(read, until, probe) {
+async function acceptance(read, until, probe, capture = async () => {}) {
     const list = await read("window.nomad.control.request('PROJECT_LIST')");
     assert.strictEqual(list.projects.length, 1);
     const id = list.projects[0].repositoryId;
@@ -85,6 +85,7 @@ async function acceptance(read, until, probe) {
     await until(() => Promise.resolve(fs.existsSync(path.join(probe.project, "RUN_MARKER"))), "authorized repository marker");
     assert(Number(fs.readFileSync(path.join(probe.project, "RUN_MARKER"), "utf8").split(".")[0]) >= 18, "external project uses modern Node");
     assert.strictEqual(Number(process.versions.node.split(".")[0]), 14, "Electron retains its internal Node 14");
+    await capture("running");
     const stopped = await read("window.nomad.assistant.interpret('para este repo')");
     assert(stopped.ok, stopped.status);
     fs.unlinkSync(path.join(probe.project, "node_modules/nomad-local-fixture/package.json"));
@@ -94,6 +95,7 @@ async function acceptance(read, until, probe) {
     await read(`window.nomadControlPlane.close(); window.repositoryLauncher.refresh().then(() => window.repositoryLauncher.selectRepository('${id}'))`);
     await read("window.repositoryLauncher.activate('run')");
     await until(() => read("window.nomadControlPlane.opened && window.nomadControlPlane.output.textContent.includes('LAUNCH //') && Array.from(window.nomadControlPlane.controls.querySelectorAll('button')).some(b => b.textContent === 'REPAIR & RUN')"), "RUN opens stable repair UI");
+    await capture("launch-doctor");
     const repair = await read(`window.nomad.control.request('PROJECT_REPAIR_AND_RUN', '${id}')`);
     assert(repair.confirmationRequired, repair.status);
     assert(repair.plan.effects.some(e => e.includes("RUN PROFILE ONCE")));

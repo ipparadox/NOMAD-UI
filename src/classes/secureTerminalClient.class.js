@@ -80,32 +80,16 @@ class SecureTerminalClient {
             }
             return true;
         });
-        parent.addEventListener("wheel", event => this.term.scrollLines(Math.round(event.deltaY / 10)));
+        this.parent = parent;
+        this._onWheel = event => this.term.scrollLines(Math.round(event.deltaY / 10));
+        parent.addEventListener("wheel", this._onWheel);
         this._removeClientState = this.bridge.onClientState(this.port, payload => this._clientState(payload));
         this.bridge.sendClientEvent(this.port, "Renderer startup");
-        const query = `?token=${encodeURIComponent(this.authToken)}`;
-        this.socket = new WebSocket(`ws://127.0.0.1:${this.port}/${query}`);
-        this.socket.addEventListener("open", () => {
-            this.term.loadAddon(new Attach(this.socket));
-            this.fit();
-            this.isReady = true;
-            resolveReady(true);
-        });
-        this.socket.addEventListener("message", () => {
-            const timestamp = Date.now();
-            if (timestamp - this.lastSoundFX > 30 && window.passwordMode === "false") {
-                window.audioManager.stdout.play();
-                this.lastSoundFX = timestamp;
-            }
-        });
-        this.socket.addEventListener("close", event => {
-            if (!this.isReady) rejectReady(new Error("Terminal transport closed before initialization"));
-            this.onclose(event);
-        });
-        this.socket.addEventListener("error", () => {
-            this.term.writeln("\r\nTERMINAL TRANSPORT UNAVAILABLE");
-            if (!this.isReady) rejectReady(new Error("Terminal transport unavailable"));
-        });
+        this._resolveReady = resolveReady;
+        this._rejectReady = rejectReady;
+        this._Attach = Attach;
+        this.reconnectAttempts = 0;
+        this._connect(this.authToken);
         this.clipboard = {
             copy: async () => {
                 if (!this.term.hasSelection()) return false;
@@ -120,6 +104,52 @@ class SecureTerminalClient {
                 return this.write(result.text);
             }
         };
+    }
+
+    _connect(token) {
+        if (this.disposed) return;
+        const query = `?token=${encodeURIComponent(token)}`;
+        this.socket = new WebSocket(`ws://127.0.0.1:${this.port}/${query}`);
+        this.socket.addEventListener("open", () => {
+            if (this.disposed) return;
+            if (this.attachAddon) this.attachAddon.dispose();
+            this.attachAddon = new this._Attach(this.socket);
+            this.term.loadAddon(this.attachAddon);
+            this.fit();
+            this.isReady = true;
+            this._resolveReady(true);
+        });
+        this.socket.addEventListener("message", () => {
+            const timestamp = Date.now();
+            if (timestamp - this.lastSoundFX > 30 && window.passwordMode === "false") {
+                window.audioManager.stdout.play();
+                this.lastSoundFX = timestamp;
+            }
+        });
+        this.socket.addEventListener("close", event => {
+            if (this.disposed) return;
+            if (this.isReady && [1006, 1011].includes(event.code) && this.reconnectAttempts < 2) {
+                this.reconnectAttempts++;
+                this.term.writeln("\r\nTERMINAL DISCONNECTED // RECONNECTING");
+                this.reconnectTimer = setTimeout(async () => {
+                    try {
+                        const capability = await this.bridge.connection(this.port);
+                        if (this.disposed) return;
+                        if (!capability || capability.port !== this.port || !/^[a-f0-9]{64}$/.test(capability.authToken || "")) throw new Error("unavailable");
+                        this._connect(capability.authToken);
+                    } catch (error) {
+                        if (!this.disposed) { this.term.writeln("\r\nTERMINAL TRANSPORT UNAVAILABLE // OPEN ANOTHER SHELL"); this.onclose(event); }
+                    }
+                }, this.reconnectAttempts * 250);
+                return;
+            }
+            this.term.writeln("\r\nTERMINAL TRANSPORT UNAVAILABLE // OPEN ANOTHER SHELL");
+            if (!this.isReady) this._rejectReady(new Error("Terminal transport closed before initialization"));
+            this.onclose(event);
+        });
+        this.socket.addEventListener("error", () => {
+            if (!this.disposed && !this.isReady) this._rejectReady(new Error("Terminal transport unavailable"));
+        });
     }
 
     fit() {
@@ -153,6 +183,11 @@ class SecureTerminalClient {
     resendCWD() { this.oncwdchange(this.cwd || null); }
 
     dispose() {
+        if (this.disposed) return;
+        this.disposed = true;
+        clearTimeout(this.reconnectTimer);
+        this.onclose = () => {};
+        this.parent.removeEventListener("wheel", this._onWheel);
         if (typeof this._removeClientState === "function") this._removeClientState();
         try { this.socket.close(); } catch (error) {}
         this.term.dispose();

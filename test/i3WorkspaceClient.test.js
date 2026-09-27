@@ -13,8 +13,11 @@ const manager = new WorkspaceManager({applications: MANAGED_APPLICATIONS, initia
 const client = new I3WorkspaceClient({ipc, manager, viewport: {}});
 client.geometry = () => ({x: 10, y: 20, width: 800, height: 600});
 
-global.window = {addEventListener: () => {}, ResizeObserver: null};
+let resizeListeners = 0;
+global.window = {addEventListener: () => { resizeListeners++; }, removeEventListener: () => { resizeListeners--; }, ResizeObserver: null};
 client.initialize();
+client.initialize();
+assert.strictEqual(resizeListeners, 1, "reinitialization must not add another resize listener");
 sent.length = 0;
 
 const observe = (appId, state, opts = {}) => client._apply({

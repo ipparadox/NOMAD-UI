@@ -621,11 +621,32 @@ class ControlPlaneService {
     }
 
     async _systemStatus() {
-        const repositories = this.repositoryActions ? await this.repositoryActions.list() : {repositories: []};
+        let repositories = {repositories: []};
+        let automationHealth = "UNKNOWN";
+        let launchDoctorHealth = "UNKNOWN — SELECT A REPOSITORY";
+        try { if (this.repositoryActions) repositories = await this.repositoryActions.list(); }
+        catch (_) { repositories = {ok: false, repositories: []}; }
+        try {
+            if (this.automation) {
+                const result = await this.automation.list();
+                automationHealth = result && result.ok && Array.isArray(result.projects) ? "OK" : "DEGRADED";
+            }
+        } catch (_) { automationHealth = "FAILED"; }
+        try {
+            if (this.context.selectedRepositoryId && this.repositoryActions && this.repositoryActions.doctor) {
+                const result = await this.request({actionId: "PROJECT_DIAGNOSE", targetId: this.context.selectedRepositoryId});
+                launchDoctorHealth = result && result.kind === "diagnosis" ? "OK — DIAGNOSIS AVAILABLE" : "DEGRADED";
+            }
+        } catch (_) { launchDoctorHealth = "FAILED"; }
         return {
             ok: true,
             kind: "system-status",
             status: "SYSTEM STATUS READY",
+            repositoriesHealth: this.repositoryActions && repositories.ok !== false && Array.isArray(repositories.repositories) ? "OK" : "UNKNOWN",
+            windowSyncHealth: this.windowManager && this.windowManager.available === true
+                && this.windowManager.lastObservationAt && Date.now() - this.windowManager.lastObservationAt < 10000 ? "OK" : "UNKNOWN",
+            automationHealth,
+            launchDoctorHealth,
             profile: this._selectedProfile(),
             selectedRepositoryId: this.context.selectedRepositoryId,
             activeApplicationId: this.context.activeApplicationId,

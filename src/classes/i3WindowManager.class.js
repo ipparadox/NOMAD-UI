@@ -531,13 +531,20 @@ class I3WindowManager {
         return collectI3TreeNodes(node, predicate, matches);
     }
 
-    async _checkManagedWindows() {
-        if (!this.available) return;
+    _checkManagedWindows() {
+        if (!this.available) return Promise.resolve();
+        if (!this._scanPending) this._scanPending = this._observeManagedWindows().finally(() => { this._scanPending = null; });
+        return this._scanPending;
+    }
+
+    async _observeManagedWindows() {
         let tree;
-        try { tree = await this._tree(); } catch (error) { return; }
+        try { tree = await this._tree(); this.lastObservationAt = Date.now(); }
+        catch (error) { return; }
         Object.keys(this.applications).forEach(appId => {
             const rememberedId = this.windows[appId];
-            const rememberedContext = rememberedId ? this._walkContext(tree, node => node.id === rememberedId) : null;
+            const rememberedContext = rememberedId ? this._walkContext(tree,
+                node => node.id === rememberedId && this._matches(node, this.applications[appId])) : null;
             if (rememberedId && !rememberedContext) {
                 delete this.windows[appId];
                 delete this.windowStates[appId];
@@ -554,7 +561,7 @@ class I3WindowManager {
             const lifecycle = focused ? "ACTIVE" : (visible ? "RUNNING" : "HIDDEN");
             const changed = !previousState || focused !== previousState.focused || hidden !== previousState.hidden || visible !== previousState.visible;
             const workspaceVisible = observationState.workspaceVisible === null ? "unknown" : observationState.workspaceVisible;
-            this.log("info", `${appId} tree scan: con_id=${windowNode.id} node.focused=${Boolean(windowNode.focused)} descendantFocused=${descendantFocused} node.visible=${observationState.nodeVisible} workspace=${observationState.workspaceName} workspace.visible=${workspaceVisible} scratchpad_state=${observationState.scratchpadState} visible=${visible} discovered=${!rememberedId} lifecycle=${changed ? lifecycle : "none"}`);
+            if (!rememberedId || changed) this.log("info", `${appId} tree scan: con_id=${windowNode.id} node.focused=${Boolean(windowNode.focused)} descendantFocused=${descendantFocused} node.visible=${observationState.nodeVisible} workspace=${observationState.workspaceName} workspace.visible=${workspaceVisible} scratchpad_state=${observationState.scratchpadState} visible=${visible} discovered=${!rememberedId} lifecycle=${changed ? lifecycle : "none"}`);
             if (!rememberedId || changed) {
                 this.windows[appId] = windowNode.id;
                 const observation = this._result(true, appId, visible ? "RUNNING" : "HIDDEN", {

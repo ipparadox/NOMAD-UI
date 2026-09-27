@@ -213,11 +213,23 @@ async function run() {
             workingDirectory: "."
         });
         const logRecord = realManager.records.get(logRepository.id);
-        await new Promise(resolve => logRecord.child.once("exit", resolve));
+        await new Promise(resolve => logRecord.child.once("close", resolve));
         const captured = fs.readFileSync(logRecord.logPath, "utf8");
         assert(captured.includes("STDOUT"));
         assert(captured.includes("STDERR"));
         assert.strictEqual(realManager.getStatus(logRepository.id).state, "STOPPED");
+
+        // Every supervised log, including ordinary profiles, has a total budget.
+        fs.writeFileSync(logRecord.logPath, Buffer.alloc(2 * 1024 * 1024 - 16, 120));
+        realManager.start(logRepository, {
+            profileId: "safe-log", displayName: "SAFE LOG", executable: "node",
+            args: ["-e", "process.stdout.write('y'.repeat(1024*1024)); process.stderr.write('z'.repeat(1024*1024))"],
+            workingDirectory: "."
+        });
+        const verbose = realManager.records.get(logRepository.id);
+        await new Promise(resolve => verbose.child.once("close", resolve));
+        assert.strictEqual(verbose.child.exitCode, 0, "full log still drains child output");
+        assert.strictEqual(fs.statSync(verbose.logPath).size, 2 * 1024 * 1024, "log stops at its byte budget");
 
         const treeRepositoryPath = path.join(temporaryRoot, "tree-repository");
         fs.mkdirSync(treeRepositoryPath);

@@ -6,7 +6,13 @@ import secrets
 import subprocess
 import tempfile
 import time
+import argparse
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--polish", action="store_true")
+parser.add_argument("--layout-only", action="store_true")
+parser.add_argument("--soak-seconds", type=int, default=0)
+options = parser.parse_args()
 root = pathlib.Path(__file__).resolve().parent.parent
 children = []
 with tempfile.TemporaryDirectory(prefix="nomad-i3-gui-") as temporary:
@@ -27,7 +33,7 @@ with tempfile.TemporaryDirectory(prefix="nomad-i3-gui-") as temporary:
                       + f"ipc-socket {environment['I3SOCK']}\n")
     try:
         with (directory / "xwayland.log").open("w") as output:
-            children.append(subprocess.Popen(["Xwayland", display, "-geometry", "1600x900",
+            children.append(subprocess.Popen(["Xwayland", display, "-geometry", "1920x1200" if options.polish else "1600x900",
                                               "-nolisten", "tcp", "-auth", str(authority), "-noreset"],
                                              stdout=output, stderr=output))
         for _ in range(100):
@@ -51,8 +57,9 @@ with tempfile.TemporaryDirectory(prefix="nomad-i3-gui-") as temporary:
             raise RuntimeError("Private i3 socket unavailable")
         print("Private authenticated Xwayland/i3 session ready", flush=True)
         result = subprocess.run([str(root / "node_modules/.bin/electron"),
-                                 "test/secureProduction.gui.js", "--nointro", "--test-i3"],
-                                cwd=root, env=environment, timeout=150)
+                                 "test/secureProduction.gui.js", "--nointro", "--test-i3"]
+                                + (["--polish", f"--soak-seconds={min(1800, max(10, options.soak_seconds))}"] if options.polish else []) + (["--layout-only"] if options.layout_only else []),
+                                cwd=root, env=environment, timeout=300 + min(1800, max(0, max(options.soak_seconds, int(os.environ.get("NOMAD_GUI_SOAK_SECONDS", "0"))))))
         raise SystemExit(result.returncode)
     finally:
         for child in reversed(children):

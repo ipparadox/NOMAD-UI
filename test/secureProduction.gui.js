@@ -10,8 +10,12 @@ process.env.NOMAD_PRODUCTION = "1";
 app.setName(require("../src/package.json").productName);
 app.setPath("userData", fs.mkdtempSync(path.join(os.tmpdir(), "nomad-secure-gui-")));
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const startup = {started: Date.now()};
 const testI3 = process.argv.includes("--test-i3");
+const testPolish = process.env.NOMAD_GUI_POLISH === "1" || process.argv.includes("--polish");
+const soakSeconds = Math.min(1800, Math.max(10, Number((process.argv.find(arg => arg.startsWith("--soak-seconds=")) || "").split("=")[1]) || Number(process.env.NOMAD_GUI_SOAK_SECONDS) || 10));
 const automationGui = require("./automation.gui.js");
+const polishGui = require("./systemPolish.gui.js");
 const automationFixture = automationGui.fixture(app.getPath("userData"));
 if (testI3) {
     // Main-only fixture configuration; real registry validation and OS launches.
@@ -44,6 +48,7 @@ app.on("browser-window-created", (event, win) => {
     if (tested) return;
     tested = true;
     const firstVisible = new Promise(resolve => win.once("show", () => {
+        startup.firstVisibleMs = Date.now() - startup.started;
         win.webContents.executeJavaScript("Boolean(window.nomadLogin && window.nomadLogin.wave.frames > 0 && !document.getElementById('main_shell'))")
             .then(resolve, () => resolve(false));
     }));
@@ -61,6 +66,7 @@ app.on("browser-window-created", (event, win) => {
         let exitCode = 0;
         try {
             await until(() => read("window.nomadLogin && window.nomadLogin.state === 'AUTH_READY'"), "login ready", 20000);
+            startup.loginReadyMs = Date.now() - startup.started;
             assert(await read("!document.getElementById('main_shell') && !window.term"), "no terminal before confirmation");
             assert(await read("document.body.classList.contains('nomad-login-active') && !document.getElementById('nomad_secure_bootstrap_status')"));
             assert(await read("document.activeElement === window.nomadLogin.button"), "keyboard-first focus");
@@ -120,8 +126,10 @@ app.on("browser-window-created", (event, win) => {
                 && scaledLayout.top > 0 && scaledLayout.bottom < scaledLayout.stripTop,
             `login remains balanced at 125% display scaling: ${JSON.stringify(scaledLayout)}`);
             win.webContents.setZoomFactor(1);
+            if (testPolish) await polishGui.matrix(win, read, true);
             await sleep(300);
             win.webContents.sendInputEvent({type: "keyDown", keyCode: "Return"});
+            startup.entryRequested = Date.now();
             win.webContents.sendInputEvent({type: "keyUp", keyCode: "Return"});
             let transitionCaptured = false;
             for (let i = 0; i < 100; i++) {
@@ -140,6 +148,12 @@ app.on("browser-window-created", (event, win) => {
             await sleep(300);
             assert.strictEqual(await read("window.nomadLogin.wave.frames"), stoppedFrames);
             fs.writeFileSync("/tmp/nomad-ready.png", (await win.webContents.capturePage()).toPNG());
+            startup.entryToInteractiveMs = Date.now() - startup.entryRequested;
+            if (testPolish) fs.writeFileSync("/tmp/nomad-v068/startup.json", JSON.stringify(startup, null, 2));
+            if (process.argv.includes("--layout-only")) {
+                await polishGui.matrix(win, read, false);
+                return;
+            }
             const prefs = win.webContents.getLastWebPreferences();
             assert.strictEqual(prefs.nodeIntegration, false);
             assert.strictEqual(prefs.contextIsolation, true);
@@ -216,7 +230,11 @@ app.on("browser-window-created", (event, win) => {
             await sleep(1200);
             assert(await read("window.nomadControlPlane.input.value === '' && !window.nomadControlPlane.pending"), "virtual Enter submits assistant");
             await read("window.nomadControlPlane.close()");
-            await automationGui.acceptance(read, until, automationFixture);
+            await automationGui.acceptance(read, until, automationFixture, async state => {
+                if (!testPolish) return;
+                await sleep(150);
+                fs.writeFileSync(`/tmp/nomad-v068/${state}.png`, (await win.webContents.capturePage()).toPNG());
+            });
             const repoCount = await read("window.repositoryLauncher.repositories.length");
             if (repoCount) {
                 assert(await read(`(async () => {
@@ -312,6 +330,10 @@ app.on("browser-window-created", (event, win) => {
             const after = await read(snapshot);
             Object.keys(before).forEach(key => assert(after[key] > before[key], `${key} must advance during 30s observation`));
             console.log(`SECURE GUI PASS: isolation, terminal round trip, virtual keys, native Ctrl+A/C/V, Ctrl+Space, assistant Enter, repository selection (${repoCount}), workspace launcher, 30s clock/system/network/graphs/globe progression`);
+            if (testPolish) {
+                await polishGui.matrix(win, read, false);
+                await polishGui.diagnostics(win, read, soakSeconds);
+            }
             console.log(testI3 ? "NOT VALIDATED HERE: real CODE/BROWSER profiles and dedicated GDM login" : "NOT VALIDATED HERE: i3 managed external applications and dedicated GDM session");
         } catch (error) {
             console.error(`SECURE GUI FAIL: ${error.message}`);

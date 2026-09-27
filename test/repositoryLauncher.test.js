@@ -166,6 +166,14 @@ async function run() {
     launcher._handleKeydown(keyEvent("Escape"));
     assert.strictEqual(launcher.isOpen, false);
 
+    launcher.setRepositories([Object.assign({}, repository, {actions: [{id: "run", label: "RUN", enabled: true}]})]);
+    launcher.selectRepository(repositoryId);
+    let profileFocused = false;
+    launcher.profileSelectElement = {value: "", focus() { profileFocused = true; }};
+    const actionsBeforeProfile = actions.length;
+    assert.strictEqual(await launcher.activate("run"), false);
+    assert(profileFocused, "RUN without profile focuses the selector");
+    assert.strictEqual(actions.length, actionsBeforeProfile, "missing profile never starts a process");
     launcher.destroy();
     console.log("Repository action selection, PULL, add/clone keyboard workflow, Escape, and disappearance behavior passed");
 }

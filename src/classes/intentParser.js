@@ -37,6 +37,7 @@ class DeterministicIntentParser {
         if (typeof input !== "string" || input.length > 2048 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(input)) {
             return {kind: "INVALID", status: "INTENT INPUT INVALID"};
         }
+        if (["system check", "comprueba el sistema"].includes(input.trim().toLowerCase())) return {kind: "ACTION", actionId: "SYSTEM_STATUS"};
         const text = normalizeIntentText(input);
         if (!text) return {kind: "UNKNOWN", status: "UNKNOWN NOMAD INTENT"};
         if (SHELL_REQUEST_PATTERNS.some(pattern => pattern.test(text))) {

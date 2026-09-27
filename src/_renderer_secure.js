@@ -550,6 +550,7 @@ function reportSecureBootstrapFailure(stage, error) {
         activateApplication,
         synchronizeApplication,
         refreshRepositories,
+        healthCheck: () => nomadSystemHealth(window),
         refreshApplications: reloadApplications
     }).initialize();
     window.nomadControlPlane = controlPlane;
@@ -575,7 +576,16 @@ function reportSecureBootstrapFailure(stage, error) {
         });
     }
     refreshSecurityStrip();
-    setInterval(refreshSecurityStrip, 30000);
+    const securityTimer = setInterval(refreshSecurityStrip, 30000);
+    window.addEventListener("beforeunload", () => {
+        clearInterval(securityTimer);
+        window.i3WorkspaceClient.destroy();
+        window.keyboard.dispose();
+        Object.values(window.term).forEach(terminal => terminal.dispose());
+        controlPlane.destroy();
+        repositoryLauncher.destroy();
+        window.applicationLauncher.destroy();
+    }, {once: true});
 
     function createSettings() {
         const root = document.createElement("section");
@@ -630,9 +640,7 @@ function reportSecureBootstrapFailure(stage, error) {
         const button = (label, action) => { const item = document.createElement("button"); item.type = "button"; item.textContent = label; item.addEventListener("click", action); return item; };
         const closeSettings = () => { root.hidden = true; window.nomadInputCapture.release("nomad-settings"); focusActiveTerminal(); };
         close.addEventListener("click", closeSettings);
-        actions.append(
-            button("SAVE", async () => {
-                const patch = {
+        const readSettings = () => ({
                     username: username.value,
                     theme: themeSelect.value,
                     keyboard: keyboardSelect.value,
@@ -651,9 +659,21 @@ function reportSecureBootstrapFailure(stage, error) {
                     hideDotfiles: hideDotfiles.checked,
                     fsListView: fsListView.checked,
                     experimentalGlobeFeatures: experimentalGlobe.checked
-                };
+        });
+        let initialForm = readSettings();
+        actions.append(
+            button("SAVE", async () => {
+                const patch = readSettings();
                 const result = await bridge.settings.update(patch);
                 if (!result || !result.ok) { status.textContent = result && result.status || "SETTINGS REFUSED"; return; }
+                const keyboardOnly = Object.keys(patch).every(key => key === "virtualKeyboard" || patch[key] === initialForm[key]);
+                if (keyboardOnly) {
+                    initialForm = patch;
+                    document.body.classList.toggle("no-virtual-keyboard", !patch.virtualKeyboard);
+                    window.keyboard._releaseAll();
+                    status.textContent = "SETTINGS SAVED";
+                    return;
+                }
                 await bridge.settings.selectTheme(themeSelect.value);
                 await bridge.settings.selectKeyboard(keyboardSelect.value);
                 status.textContent = "SETTINGS SAVED // RELOADING";
@@ -737,6 +757,7 @@ function reportSecureBootstrapFailure(stage, error) {
     login.signal("telemetry", telemetryState.system.available ? "LIVE" : "UNAVAILABLE");
     login.signal("network", telemetryState.network.available ? "LIVE" : "UNAVAILABLE");
     await login.reveal();
+    window.nomadTelemetry.checkFreshness();
     window.nomadInputCapture.release("nomad-login");
     focusActiveTerminal();
     bridge.runtime.windowAction("focus");

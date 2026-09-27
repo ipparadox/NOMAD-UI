@@ -1,5 +1,13 @@
 "use strict";
 
+const NOMAD_INTENT_INDEX = {
+    PROJECTS: ["list projects", "diagnose this repo", "prepare this repo", "run this repo", "stop this repo"],
+    APPLICATIONS: ["scan applications", "what new applications are there"],
+    SECURITY: ["security status", "security audit", "security verify"],
+    SYSTEM: ["system check", "help"]
+};
+
+
 class ControlPlaneView {
     constructor(opts = {}) {
         if (!opts.bridge || !opts.bridge.control || !opts.bridge.assistant) {
@@ -14,6 +22,11 @@ class ControlPlaneView {
         this.synchronizeApplication = typeof opts.synchronizeApplication === "function" ? opts.synchronizeApplication : (() => false);
         this.refreshRepositories = typeof opts.refreshRepositories === "function" ? opts.refreshRepositories : (() => Promise.resolve(false));
         this.refreshApplications = typeof opts.refreshApplications === "function" ? opts.refreshApplications : (() => Promise.resolve(false));
+        this.healthCheck = opts.healthCheck || null;
+        this.history = [];
+        this.historyIndex = 0;
+        this.historyDraft = "";
+        this.viewVersion = 0;
         this.mode = "assistant";
         this.opened = false;
         this.currentProfile = "NORMAL";
@@ -26,6 +39,8 @@ class ControlPlaneView {
     }
 
     initialize() {
+        if (this.initialized) return this;
+        this.initialized = true;
         this.hostWindow.addEventListener("keydown", this._onGlobalKeydown, true);
         if (this.bridge.automation) this.unsubscribeAutomation = this.bridge.automation.onState(result => {
             if (result.kind === "application-stage") {
@@ -40,6 +55,9 @@ class ControlPlaneView {
     }
 
     destroy() {
+        if (this.destroyed) return;
+        this.destroyed = true;
+        this.history = [];
         this.close();
         if (this.unsubscribeAutomation) this.unsubscribeAutomation();
         this.hostWindow.removeEventListener("keydown", this._onGlobalKeydown, true);
@@ -61,7 +79,9 @@ class ControlPlaneView {
     }
 
     open(mode = "assistant") {
+        if (this.destroyed) return false;
         if (!['assistant', 'security', 'applications', 'projects'].includes(mode)) mode = "assistant";
+        this.viewVersion++;
         this.mode = mode;
         this.opened = true;
         this.root.hidden = false;
@@ -72,7 +92,10 @@ class ControlPlaneView {
         if (this.inputCapture) this.inputCapture.acquire("nomad-control-plane");
         if (mode === "assistant") {
             this.input.value = "";
-            this._line("STRUCTURED NOMAD ACTIONS ONLY", "muted");
+            this.historyIndex = this.history.length;
+            this._line("STRUCTURED NOMAD ACTIONS ONLY // HELP FOR COMMANDS", "muted");
+            this.controls.append(this._button("HELP", () => this.showHelp()));
+            if (this.healthCheck) this.controls.append(this._button("SYSTEM CHECK", () => this.showHealth()));
             this.input.focus({preventScroll: true});
             if (this.latestAutomation) this.controls.append(this._button("SETUP STATUS", () => this._renderAutomation(this.latestAutomation)));
         } else if (mode === "projects") {
@@ -88,6 +111,7 @@ class ControlPlaneView {
 
     close() {
         if (!this.opened) return false;
+        this.viewVersion++;
         this.opened = false;
         this.root.hidden = true;
         if (this.inputCapture) this.inputCapture.release("nomad-control-plane");
@@ -99,18 +123,28 @@ class ControlPlaneView {
         if (this.pending) return false;
         const input = this.input.value;
         if (!input.trim()) return false;
+        const command = input.trim().toLowerCase();
+        if (this.history[this.history.length - 1] !== input) this.history.push(input.slice(0, 2048));
+        if (this.history.length > 50) this.history.shift();
+        this.historyIndex = this.history.length;
+        this.historyDraft = "";
+        this.input.value = "";
+        if (["help", "commands", "?"].includes(command)) { this.showHelp(); return true; }
+        if (["system check", "comprueba el sistema"].includes(command) && this.healthCheck) return this.showHealth();
         this._clear();
         this._line(`> ${input}`, "request");
         this._line("CHECKING", "muted");
         this.input.value = "";
         this.pending = true;
         this._setBusy(true);
+        const viewVersion = this.viewVersion;
         let result;
         try { result = await this.bridge.assistant.interpret(input); }
         catch (error) { result = {ok: false, status: "NOMAD CONTROL UNAVAILABLE"}; }
         this.pending = false;
         this._setBusy(false);
-        this._renderResult(result);
+        if (!this.destroyed && viewVersion === this.viewVersion) this._renderResult(result);
+        this._refreshChangedView(viewVersion);
         if (this.opened && this.mode === "assistant") this.input.focus({preventScroll: true});
         return Boolean(result && result.ok);
     }
@@ -120,13 +154,59 @@ class ControlPlaneView {
         this.pending = true;
         this._setBusy(true);
         if (this.mode !== "assistant") this._clear();
+        const viewVersion = this.viewVersion;
         let result;
         try { result = await this.bridge.control.request(actionId, targetId); }
         catch (error) { result = {ok: false, status: "NOMAD CONTROL UNAVAILABLE"}; }
         this.pending = false;
         this._setBusy(false);
-        this._renderResult(result);
+        if (!this.destroyed && viewVersion === this.viewVersion) this._renderResult(result);
+        this._refreshChangedView(viewVersion);
         return Boolean(result && result.ok);
+    }
+
+    _refreshChangedView(previousVersion) {
+        if (this.destroyed || !this.opened || previousVersion === this.viewVersion) return;
+        // Refresh only the newly requested read-only view, never replay an action.
+        const action = {projects: "PROJECT_LIST", security: "SECURITY_STATUS", applications: "APPLICATION_LIST"}[this.mode];
+        if (action) this.request(action);
+    }
+
+    showHelp() {
+        this._clear();
+        this._line("COMMAND INDEX //");
+        Object.entries(NOMAD_INTENT_INDEX).forEach(([name, commands]) => {
+            this._field(name, commands.join(" / "));
+            commands.forEach(command => this.controls.append(this._button(command, () => {
+                this.input.value = command;
+                this.input.focus({preventScroll: true});
+            })));
+        });
+    }
+
+    async showHealth() {
+        if (this.pending || !this.healthCheck) return false;
+        this.pending = true;
+        this._setBusy(true);
+        this._clear();
+        this._line("SYSTEM CHECK // CHECKING");
+        const viewVersion = this.viewVersion;
+        try {
+            const fields = await this.healthCheck();
+            if (this.destroyed || viewVersion !== this.viewVersion) return false;
+            this._clear();
+            this._line("SYSTEM CHECK //");
+            fields.forEach(field => this._field(field.label, field.value));
+        } catch (error) {
+            if (!this.destroyed && viewVersion === this.viewVersion) {
+                this._clear(); this._line("SYSTEM CHECK // UNKNOWN", "error");
+            }
+        } finally {
+            this.pending = false;
+            this._setBusy(false);
+            this._refreshChangedView(viewVersion);
+        }
+        return true;
     }
 
     _mount() {
@@ -164,7 +244,17 @@ class ControlPlaneView {
         this.input.spellcheck = false;
         this.input.setAttribute("aria-label", "NOMAD structured action");
         this.input.addEventListener("keydown", event => {
-            if (event.key === "Escape") {
+            if (event.key === "Tab" && this.input.value.trim()) {
+                const prefix = this.input.value.trim().toLowerCase();
+                const matches = Object.values(NOMAD_INTENT_INDEX).flat().filter(command => command.startsWith(prefix));
+                if (matches.length === 1) { event.preventDefault(); this.input.value = matches[0]; }
+            } else if (["ArrowUp", "ArrowDown"].includes(event.key) && !event.altKey && !event.ctrlKey) {
+                event.preventDefault();
+                event.stopPropagation();
+                if (this.historyIndex === this.history.length) this.historyDraft = this.input.value;
+                this.historyIndex = Math.max(0, Math.min(this.history.length, this.historyIndex + (event.key === "ArrowUp" ? -1 : 1)));
+                this.input.value = this.historyIndex === this.history.length ? this.historyDraft : this.history[this.historyIndex];
+            } else if (event.key === "Escape") {
                 event.preventDefault();
                 event.stopPropagation();
                 this.close();
@@ -335,7 +425,12 @@ class ControlPlaneView {
             return;
         }
         this._line(result.status || (result.ok ? "ACTION COMPLETE" : "ACTION REFUSED"), result.ok ? "success" : "error");
-        if (result.detail) this._line(result.detail, "muted");
+        if (!result.ok) {
+            this._field("CAUSE", result.detail || result.status || "UNKNOWN");
+            this._field("STATUS", "REFUSED");
+            this._field("NEXT ACTION", "REVIEW SUPPORTED COMMANDS OR DIAGNOSE THE SELECTED PROJECT");
+            this.controls.append(this._button("HELP", () => this.showHelp()));
+        } else if (result.detail) this._line(result.detail, "muted");
         if (result.kind === "missing-context" && !result.detail) this._line("SELECT A REPOSITORY FIRST", "warning");
         if (result.terminalAvailable) this.controls.append(this._button("OPEN TERMINAL", () => {
             this.activateApplication("terminal");

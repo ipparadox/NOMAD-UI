@@ -59,13 +59,19 @@ class RepositoryLauncher {
         return this.refresh();
     }
 
-    async refresh() {
+    refresh() {
+        if (!this.refreshPromise) this.refreshPromise = this._refresh().finally(() => { this.refreshPromise = null; });
+        return this.refreshPromise;
+    }
+
+    async _refresh() {
         let result;
         try {
             result = await this.loadRepositories();
         } catch (error) {
             result = {ok: false, status: "REPOSITORY SERVICE UNAVAILABLE", repositories: []};
         }
+        if (this.destroyed) return false;
         this.setRepositories(result && Array.isArray(result.repositories) ? result.repositories : [], result && result.status);
         return Boolean(result && result.ok !== false);
     }
@@ -77,6 +83,7 @@ class RepositoryLauncher {
         this._renderRepositories();
 
         if (selectedId && !this.repositories.some(repository => repository.id === selectedId)) {
+            this.selectedRepositoryId = null;
             this.onselect(null);
             this.close({restoreFocus: false});
         } else if (this.isOpen) {
@@ -245,6 +252,11 @@ class RepositoryLauncher {
             return false;
         }
 
+        if (action.id === "run" && this.profileSelectElement && !this.profileSelectElement.value) {
+            this._showError("RUN PROFILE REQUIRED\nSELECT A RUN PROFILE TO CONTINUE");
+            if (this.profileSelectElement) this.profileSelectElement.focus({preventScroll: true});
+            return false;
+        }
         return this._invokeAction(repository, action, {});
     }
 
@@ -431,6 +443,7 @@ class RepositoryLauncher {
     }
 
     destroy() {
+        this.destroyed = true;
         this.close({restoreFocus: false, resume: false});
         this._setInputCapture(false);
         if (this.addTrigger) {
@@ -935,8 +948,10 @@ class RepositoryLauncher {
         const rect = entry.getBoundingClientRect();
         const gap = Math.max(6, Math.round(this.hostWindow.innerHeight * 0.007));
         const width = Math.max(230, Math.min(330, Math.round(this.hostWindow.innerWidth * 0.17)));
+        this.element.style.width = `${Math.floor(width)}px`;
+        this.element.style.maxHeight = `${Math.max(80, this.hostWindow.innerHeight - gap * 2)}px`;
         const left = Math.min(Math.max(gap, rect.left), this.hostWindow.innerWidth - width - gap);
-        const top = Math.max(gap, rect.top - this.element.offsetHeight - gap);
+        const top = Math.max(gap, Math.min(rect.top - this.element.offsetHeight - gap, this.hostWindow.innerHeight - this.element.offsetHeight - gap));
         this.element.style.width = `${Math.floor(width)}px`;
         this.element.style.left = `${Math.floor(left)}px`;
         this.element.style.top = `${Math.floor(top)}px`;

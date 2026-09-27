@@ -182,7 +182,7 @@ class RepositoryProcessManager {
             shell: false,
             detached: this.platform !== "win32",
             windowsHide: true,
-            stdio: profile.boundedOutput ? ["ignore", "pipe", "pipe"] : ["ignore", log.descriptor, log.descriptor]
+            stdio: ["ignore", "pipe", "pipe"]
         };
 
         let child;
@@ -194,24 +194,25 @@ class RepositoryProcessManager {
             this.isolationService.cleanup(isolation);
             throw error instanceof RepositoryProcessError ? error : new RepositoryProcessError("REPOSITORY RUN FAILED");
         }
-        if (!profile.boundedOutput) this._closeDescriptor(log.descriptor);
         if (!child || !Number.isSafeInteger(child.pid) || child.pid <= 0
             || typeof child.once !== "function") {
             if (child && typeof child.once === "function") {
                 child.once("error", () => this.log("warn", "REPOSITORY RUN PROCESS START FAILED"));
             }
-            if (profile.boundedOutput) this._closeDescriptor(log.descriptor);
+            this._closeDescriptor(log.descriptor);
             this.isolationService.cleanup(isolation);
             throw new RepositoryProcessError("REPOSITORY RUN FAILED");
         }
 
-        if (typeof profile.boundedOutput === "function") {
-            let remaining = 65536;
+        {
+            // Drain even after the budget is exhausted so verbose children cannot
+            // block on a full pipe. Preserve existing evidence for ordinary runs.
+            let remaining = profile.boundedOutput ? 65536 : Math.max(0, 2 * 1024 * 1024 - log.size);
             let closed = false;
             child.once("close", () => { closed = true; this._closeDescriptor(log.descriptor); });
             [child.stdout, child.stderr].forEach((stream, streamIndex) => {
                 if (stream) stream.on("data", chunk => {
-                    profile.boundedOutput(chunk, streamIndex === 0 ? "stdout" : "stderr");
+                    if (typeof profile.boundedOutput === "function") profile.boundedOutput(chunk, streamIndex === 0 ? "stdout" : "stderr");
                     if (closed || remaining <= 0) return;
                     const bounded = chunk.subarray(0, remaining);
                     try { this.fs.writeSync(log.descriptor, bounded); remaining -= bounded.length; }
@@ -498,7 +499,7 @@ class RepositoryProcessManager {
             }
             this.fs.fchmodSync(descriptor, 0o600);
             if (setup) this.fs.ftruncateSync(descriptor, 0);
-            const result = {descriptor, path: logPath};
+            const result = {descriptor, path: logPath, size: setup ? 0 : openedLogStats.size};
             descriptor = undefined;
             return result;
         } catch (error) {

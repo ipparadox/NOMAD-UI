@@ -190,6 +190,23 @@ async function run() {
     assert.strictEqual(geometryResult.status, "RUNNING");
     assert.deepStrictEqual(geometryPlacement, {conId: 707, geometry, focus: false});
 
+    // Controlled disappearance/identity replacement must clear stale ACTIVE state.
+    codeTree = workspaceTree("browser", {containerId: 505, focused: true});
+    await codeManager._checkManagedWindows();
+    assert(codeStates.some(state => state.appId === "code" && state.state === "CLOSED" && !state.running));
+    assert.strictEqual(codeManager.windows.code, undefined, "reused container is not a trusted identity");
+    codeTree = workspaceTree("code", {containerId: 808, focused: true});
+    await codeManager._checkManagedWindows();
+    assert.strictEqual(codeManager.windows.code, 808, "trusted class can be rediscovered");
+    let completeScan;
+    let scans = 0;
+    codeManager._tree = () => { scans++; return new Promise(resolve => { completeScan = resolve; }); };
+    const scan1 = codeManager._checkManagedWindows();
+    const scan2 = codeManager._checkManagedWindows();
+    assert.strictEqual(scans, 1, "concurrent snapshots share one i3 observation");
+    completeScan(codeTree);
+    await Promise.all([scan1, scan2]);
+
     console.log("I3WindowManager focus, visibility, scratchpad, and geometry observations passed");
 }
 

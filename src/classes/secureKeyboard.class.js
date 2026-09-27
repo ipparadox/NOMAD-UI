@@ -25,7 +25,19 @@ class SecureKeyboard {
         this._onPhysicalKeyup = event => this.keyupHandler(event);
         document.addEventListener("keydown", this._onPhysicalKeydown);
         document.addEventListener("keyup", this._onPhysicalKeyup);
-        window.addEventListener("blur", () => this._releaseAll());
+        this._onBlur = () => this._releaseAll();
+        window.addEventListener("blur", this._onBlur);
+    }
+
+    dispose() {
+        this._releaseAll();
+        document.removeEventListener("keydown", this._onPhysicalKeydown);
+        document.removeEventListener("keyup", this._onPhysicalKeyup);
+        window.removeEventListener("blur", this._onBlur);
+        this.container.querySelectorAll(".keyboard_key").forEach(key => clearTimeout(key.blinkTimeout));
+        this.container.replaceChildren();
+        this.linkedToTerm = false;
+        this._lastPhysicalKeydown = this._lastPhysicalKeyup = null;
     }
 
     attach() { this.linkedToTerm = true; }
@@ -304,7 +316,10 @@ class SecureKeyboard {
             item.classList.remove("active");
             item.classList.add("blink");
         });
-        setTimeout(() => keys.forEach(item => item.classList.remove("blink")), 100);
+        keys.forEach(item => {
+            clearTimeout(item.blinkTimeout);
+            item.blinkTimeout = setTimeout(() => item.classList.remove("blink"), 100);
+        });
     }
 
     _releaseAll() {
@@ -312,7 +327,7 @@ class SecureKeyboard {
         this.ctrl = false;
         this.alt = false;
         this._state();
-        this.container.querySelectorAll(".keyboard_key.active").forEach(key => {
+        this.container.querySelectorAll(".keyboard_key").forEach(key => {
             clearTimeout(key.holdTimeout);
             clearInterval(key.holdInterval);
             key.classList.remove("active");

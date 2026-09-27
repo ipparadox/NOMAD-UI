@@ -90,7 +90,7 @@ class Globe {
 }
 const theme = {r: 0, g: 200, b: 255, colors: {light_black: "#000000"}, cssvars: {font_main: "Exo 2"}};
 const window = {settings: {}, theme, TimeSeries: Series, SmoothieChart: Chart, ENCOM: {Globe},
-    audioManager: {scan: {play() {}}, panels: {play() {}}}, addEventListener() {}};
+    audioManager: {scan: {play() {}}, panels: {play() {}}}, addEventListener() {}, removeEventListener() {}};
 const context = vm.createContext({document, window, console, Date: Clock,
     setInterval: fn => { intervals.set(++timerId, fn); return timerId; }, clearInterval: id => intervals.delete(id),
     setTimeout: fn => { timeouts.set(++timerId, fn); return timerId; }, clearTimeout: id => timeouts.delete(id),
@@ -141,8 +141,42 @@ async function run() {
     networkUpdate({ok: false, sequence: 3, timestamp: now});
     assert.strictEqual(dashboard.network.trafficSeries[0].data.length, samples, "failure must not append fake zero traffic");
     assert(dashboard.network.trafficCharts.every(chart => !chart.running));
+    await dashboard.initialize();
+    assert.strictEqual(intervals.size, 2, "initialization is idempotent: clock + watchdog");
+    const globe = dashboard.network.globe;
+    const canvas = globe.globe.domElement;
+    canvas.offsetWidth = 120;
+    canvas.offsetHeight = 54;
+    let renderedSize;
+    globe.globe.camera = {updateProjectionMatrix() {}};
+    globe.globe.renderer = {setSize(width, height) { renderedSize = [width, height]; }, dispose() {}};
+    globe.resize();
+    assert.deepStrictEqual(renderedSize, [120, 54], "small CSS canvas must not be stretched from a 160x120 backing size");
+    assert.strictEqual(globe.globe.camera.aspect, 120 / 54, "projection matches displayed aspect ratio");
+    document.hidden = true;
+    dashboard.checkFreshness();
+    assert.strictEqual(frames.size, 0, "hidden globe schedules no frames");
+    document.hidden = false;
+    dashboard.checkFreshness();
+    assert.strictEqual(frames.size, 1, "visible globe resumes once");
+    for (let sequence = 5; sequence < 1005; sequence++) {
+        systemUpdate({...system, sequence, timestamp: ++now});
+    }
+    assert(dashboard.system.cpuSeries.every(series => series.data.length <= 600), "buffers stay bounded without chart paints");
     dashboard.dispose();
-    assert.strictEqual(unsubscribed, 2); assert.strictEqual(intervals.size, 0); assert.strictEqual(frames.size, 0);
+    dashboard.dispose();
+    assert(!document.listeners.visibilitychange, "visibility listener removed");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.strictEqual(timeouts.size, 0, "panel and settled recovery timers cleared");
+    assert.strictEqual(unsubscribed, 4, "one replacement subscription per stale channel, all removed"); assert.strictEqual(intervals.size, 0); assert.strictEqual(frames.size, 0);
+    let recoveries = 0;
+    const failed = new window.SecureTelemetryDashboard({});
+    failed.system = {lastReceived: 0, statusElement: {}, bridge: {
+        subscribeTelemetry() { recoveries++; throw new Error("test-only channel failure"); }
+    }};
+    for (let attempt = 0; attempt < 5; attempt++) assert.doesNotThrow(() => failed.checkFreshness());
+    assert.strictEqual(recoveries, 1, "failed channel recovery stays bounded");
+    assert.strictEqual(failed.system.statusElement.textContent, "SYSTEM TELEMETRY UNAVAILABLE");
     console.log("Secure telemetry DOM, subscriptions, graph samples, globe loop, clock progression, stale/failure recovery and disposal passed");
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });

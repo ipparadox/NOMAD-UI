@@ -140,7 +140,40 @@ async function run() {
     assert(!markup.includes("chat"));
     assert(!markup.includes("avatar"));
 
+    view.open("assistant");
+    const historyBefore = interpreted.length;
+    view.input.value = "help";
+    await view.submit();
+    assert(view.output.children.some(child => child.textContent === "COMMAND INDEX //"));
+    assert.strictEqual(interpreted.length, historyBefore, "help never executes an intent");
+    view.input.value = "draft";
+    view.input.dispatch("keydown", event({key: "ArrowUp"}));
+    assert.strictEqual(view.input.value, "help");
+    view.input.dispatch("keydown", event({key: "ArrowDown"}));
+    assert.strictEqual(view.input.value, "draft");
+    view.input.value = "system c";
+    view.input.dispatch("keydown", event({key: "Tab"}));
+    assert.strictEqual(view.input.value, "system check", "autocomplete uses only indexed intents");
+    let finishHealth;
+    view.healthCheck = () => new Promise(resolve => { finishHealth = resolve; });
+    const healthPending = view.showHealth();
+    view.close();
+    view.open();
+    finishHealth([{label: "OLD RESULT", value: "OK"}]);
+    await healthPending;
+    assert(!view.output.children.some(child => child.textContent.includes("OLD RESULT")), "late health cannot overwrite reopened UI");
+    const delayedHealth = view.showHealth();
+    const refreshed = [];
+    bridge.control.request = async action => { refreshed.push(action); return {ok: true, status: "REFRESHED"}; };
+    view.open("projects");
+    finishHealth([]);
+    await delayedHealth;
+    await flush();
+    assert.deepStrictEqual(refreshed, ["PROJECT_LIST"], "changing views during a pending probe refreshes only the new read-only view");
+    for (let index = 0; index < 100; index++) { view.close(); view.open(); view.initialize(); }
+    assert.strictEqual(hostWindow.listeners.size, 1);
     view.destroy();
+    assert.strictEqual(hostWindow.listeners.size, 0);
     console.log("Ctrl+Space, native assistant input capture, parser-only Enter, Escape, focus restoration, and angular HUD styling passed");
 }
 

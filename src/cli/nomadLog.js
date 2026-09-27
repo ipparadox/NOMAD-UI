@@ -38,6 +38,8 @@ function createNomadLog(opts = {}) {
     const directory = path.dirname(logPath);
     const uid = Object.prototype.hasOwnProperty.call(opts, "uid")
         ? opts.uid : (typeof process.getuid === "function" ? process.getuid() : null);
+    const maxBytes = Number.isSafeInteger(opts.maxBytes) && opts.maxBytes >= 128 ? opts.maxBytes : 2 * 1024 * 1024;
+    let firstWrite = true;
     return (level, message) => {
         const normalizedLevel = LOG_LEVELS.has(level) ? level.toUpperCase() : "INFO";
         const line = `${new Date().toISOString()} NOMAD-CLI ${normalizedLevel} ${sanitizeLogMessage(message)}\n`;
@@ -57,6 +59,22 @@ function createNomadLog(opts = {}) {
             } catch (error) {
                 if (!error || error.code !== "ENOENT") return;
             }
+            // Rotate only on the first write of this logger, never truncate an
+            // active session. Refuse unsafe archive targets just like session.log.
+            if (firstWrite && before && before.size >= maxBytes - Math.min(4096, Math.floor(maxBytes / 2))) {
+                for (const suffix of [".1", ".2"]) {
+                    try {
+                        const stats = fsModule.lstatSync(logPath + suffix);
+                        if (stats.isSymbolicLink() || !stats.isFile() || stats.nlink !== 1
+                            || (uid !== null && stats.uid !== uid) || (stats.mode & 0o077) !== 0) return;
+                    } catch (error) { if (!error || error.code !== "ENOENT") return; }
+                }
+                try { fsModule.renameSync(logPath + ".1", logPath + ".2"); }
+                catch (error) { if (!error || error.code !== "ENOENT") return; }
+                fsModule.renameSync(logPath, logPath + ".1");
+                before = null;
+            }
+            firstWrite = false;
             const constants = fsModule.constants || fs.constants;
             descriptor = fsModule.openSync(logPath,
                 constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW || 0), 0o600);
@@ -64,6 +82,9 @@ function createNomadLog(opts = {}) {
             if (!opened.isFile() || opened.nlink !== 1
                 || (uid !== null && typeof opened.uid === "number" && opened.uid !== uid)
                 || (before && (before.dev !== opened.dev || before.ino !== opened.ino))) return;
+            // Stop at the budget until the next session rotates. Do not delete
+            // or rewrite current-session evidence to make room for new messages.
+            if (Number.isFinite(opened.size) && opened.size + Buffer.byteLength(line) > maxBytes) return;
             fsModule.fchmodSync(descriptor, 0o600);
             fsModule.writeSync(descriptor, line, null, "utf8");
         } catch (error) {

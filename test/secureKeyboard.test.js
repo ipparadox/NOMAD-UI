@@ -55,6 +55,7 @@ class FakeDocument {
     createElementNS(namespace, tagName) { return this.createElement(tagName); }
     getElementById(id) { return this.elements.get(id) || null; }
     addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }
+    removeEventListener(type, listener) { this.listeners[type] = (this.listeners[type] || []).filter(fn => fn !== listener); }
 }
 
 const document = new FakeDocument();
@@ -65,6 +66,7 @@ let stdinSounds = 0;
 global.document = document;
 global.window = {
     addEventListener: (type, listener) => { physicalListeners[type] = listener; },
+    removeEventListener: type => { delete physicalListeners[type]; },
     audioManager: {
         stdin: {play: () => { stdinSounds++; }},
         granted: {play: () => true}
@@ -154,6 +156,15 @@ assert.strictEqual(keyboard.togglePasswordMode(), true);
 assert.strictEqual(window.passwordMode, "true");
 assert.strictEqual(keyboard.togglePasswordMode(), false);
 assert.strictEqual(window.passwordMode, "false");
+
+for (let cycle = 0; cycle < 100; cycle++) { keyboard.detach(); keyboard.attach(); }
+assert.strictEqual(document.listeners.keydown.length, 1);
+assert.strictEqual(document.listeners.keyup.length, 1);
+keyboard.dispose();
+keyboard.dispose();
+assert.strictEqual(document.listeners.keydown.length, 0);
+assert.strictEqual(document.listeners.keyup.length, 0);
+assert.strictEqual(Object.keys(physicalListeners).length, 0);
 
 delete global.document;
 delete global.window;
