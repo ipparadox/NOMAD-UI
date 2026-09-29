@@ -106,13 +106,27 @@ function discoverRunProfiles(repository, io = fs) {
     const inputs = readInputs(repository, io);
     return adapters.filter(a => a.detect(inputs)).flatMap(a => a.buildRunProfiles(repository, inputs).map(p => ({...p, fingerprint: a.fingerprintInputs(inputs)})));
 }
+// Cache derived plans only. Every public inspection still performs readInputs' full
+// no-follow/identity checks and hashes the current content. Never cache trust,
+// policy, runtime validation or readiness of an execution environment.
+const inspectionCache = new Map();
 function inspectProject(repository, io = fs) {
-    const inputs = readInputs(repository, io);
+    return inspectProjectInputs(repository, readInputs(repository, io));
+}
+// Main-owned operation snapshot, also used by Doctor to avoid reading each input twice.
+function inspectProjectInputs(repository, inputs) {
     const matches = adapters.filter(a => a.detect(inputs));
     if (!matches.length) return {type: "UNKNOWN", profiles: [], steps: [], state: "UNSUPPORTED", fingerprint: digest(inputs)};
     if (matches.length !== 1) return {type: "MIXED", profiles: [], steps: [], state: "BLOCKED", blocked: "MULTIPLE PROJECT TYPES REQUIRE MANUAL SELECTION", fingerprint: digest(inputs)};
-    const result = matches[0].inspect(repository, inputs);
+    const adapter = matches[0];
+    const fingerprint = digest(inputs);
+    const ready = adapter.verifyReady(repository);
+    const key = JSON.stringify([repository.canonicalPath, fingerprint, ready]);
+    if (inspectionCache.has(key)) return JSON.parse(inspectionCache.get(key));
+    const result = adapter.inspect(repository, inputs);
     result.state = result.blocked ? "BLOCKED" : result.requiresSetup ? "SETUP_REQUIRED" : result.profiles.length ? "READY" : "INSPECTED";
+    inspectionCache.set(key, JSON.stringify(result));
+    while (inspectionCache.size > 64) inspectionCache.delete(inspectionCache.keys().next().value);
     return result;
 }
-module.exports = {ProjectAdapter, NodeProjectAdapter, PythonProjectAdapter, RustProjectAdapter, inspectProject, discoverRunProfiles, readInputs, digest, VENV_EXEC};
+module.exports = {ProjectAdapter, NodeProjectAdapter, PythonProjectAdapter, RustProjectAdapter, inspectProject, inspectProjectInputs, discoverRunProfiles, readInputs, digest, VENV_EXEC};

@@ -129,6 +129,8 @@ async function diagnostics(win, read, seconds = 10) {
         await read('window.focusShellTab(1).then(() => window.focusShellTab(0))');
         await sleep(350);
     }
+    const counters = require("./support/performanceCounters.js");
+    counters.start(win);
     const started = Date.now();
     const samples = [];
     const retained = [];
@@ -138,14 +140,24 @@ async function diagnostics(win, read, seconds = 10) {
             terminalCount:await read('Object.keys(window.term).length')});
     };
     if (retainedAudit) await collectRetained();
-    const sample = async () => ({elapsed: Date.now()-started,
+    const sample = async () => {
+        // CPU usage is relative to the previous call: collect once per sample.
+        const processes = require("electron").app.getAppMetrics();
+        return {elapsed: Date.now()-started, counters:counters.snapshot(),
         dom: await debug.sendCommand("Memory.getDOMCounters"),
         metrics: (await debug.sendCommand("Performance.getMetrics")).metrics,
-        process: require("electron").app.getAppMetrics().find(metric => metric.pid === win.webContents.getOSProcessId())});
+        process: processes.find(metric => metric.pid === win.webContents.getOSProcessId()),
+        processes,
+        rendering: await read(`({reduced:window.nomadTelemetry.visualCadence && window.nomadTelemetry.visualCadence.reduced,
+            system:window.nomadTelemetry.system.lastSequence,network:window.nomadTelemetry.network.lastSequence,
+            frames:window.nomadSoakFrames ? {count:window.nomadSoakFrames.count,worst:window.nomadSoakFrames.worst,over17:window.nomadSoakFrames.over17,over33:window.nomadSoakFrames.over33,long50:window.nomadSoakFrames.long50,long100:window.nomadSoakFrames.long100}:null})`)};
+    };
     samples.push(await sample());
     const actions = [];
-    await read(`window.nomadSoakFrames = {count:0,worst:0,last:performance.now(),start:performance.now()};
-        window.nomadSoakTick = t => { const m=window.nomadSoakFrames; m.count++; m.worst=Math.max(m.worst,t-m.last); m.last=t;
+    await read(`window.nomadSoakFrames = {count:0,worst:0,over17:0,over33:0,long50:0,long100:0,last:performance.now(),start:performance.now()};
+        window.nomadSoakObserver = new PerformanceObserver(list=>{for(const entry of list.getEntries()){window.nomadSoakFrames.long50++;if(entry.duration>100)window.nomadSoakFrames.long100++;}});
+        window.nomadSoakObserver.observe({entryTypes:['longtask']});
+        window.nomadSoakTick = t => { const m=window.nomadSoakFrames; const delta=t-m.last;m.count++;m.over17+=Number(delta>16.7);m.over33+=Number(delta>33);m.worst=Math.max(m.worst,delta); m.last=t;
             m.id=requestAnimationFrame(window.nomadSoakTick); }; requestAnimationFrame(window.nomadSoakTick);`);
     let nextSample = 60000;
     for (let cycle=0; Date.now()-started < seconds*1000; cycle++) {
@@ -179,8 +191,8 @@ async function diagnostics(win, read, seconds = 10) {
             console.log(`SOAK ${Math.round((Date.now()-started)/1000)}s: ${JSON.stringify(samples[samples.length-1].dom)}`);
         }
     }
-    const frames = await read(`(() => { const m=window.nomadSoakFrames; cancelAnimationFrame(m.id);
-        document.body.classList.remove('no-virtual-keyboard'); return {fps:m.count*1000/(performance.now()-m.start),worst:m.worst}; })()`);
+    const frames = await read(`(() => { const m=window.nomadSoakFrames; cancelAnimationFrame(m.id);window.nomadSoakObserver.disconnect();
+        document.body.classList.remove('no-virtual-keyboard'); return {fps:m.count*1000/(performance.now()-m.start),worst:m.worst,over17:m.over17,over33:m.over33,long50:m.long50,long100:m.long100}; })()`);
     samples.push(await sample());
     fs.writeFileSync(path.join(output,"soak.json"),JSON.stringify({seconds,elapsedSeconds:(Date.now()-started)/1000,frames,samples,actions},null,2));
     if (retainedAudit) {
@@ -193,6 +205,7 @@ async function diagnostics(win, read, seconds = 10) {
     await sleep(150);
     fs.writeFileSync(path.join(output,"visual-audit.png"),(await win.webContents.capturePage()).toPNG());
     await read("document.getElementById('nomad_dev_visual_audit').remove()");
+    counters.stop();
     debug.detach();
 }
 module.exports = {matrix, diagnostics};

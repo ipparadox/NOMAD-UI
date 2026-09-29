@@ -14,8 +14,10 @@ const startup = {started: Date.now()};
 const testI3 = process.argv.includes("--test-i3");
 const testPolish = process.env.NOMAD_GUI_POLISH === "1" || process.argv.includes("--polish");
 const soakSeconds = Math.min(1800, Math.max(10, Number((process.argv.find(arg => arg.startsWith("--soak-seconds=")) || "").split("=")[1]) || Number(process.env.NOMAD_GUI_SOAK_SECONDS) || 10));
+const performanceLabel = (process.argv.find(arg => arg.startsWith("--performance=")) || "").split("=")[1];
 const automationGui = require("./automation.gui.js");
 const polishGui = require("./systemPolish.gui.js");
+if (testPolish) require("./support/performanceCounters.js").installIPC();
 const automationFixture = automationGui.fixture(app.getPath("userData"));
 if (testI3) {
     // Main-only fixture configuration; real registry validation and OS launches.
@@ -150,6 +152,10 @@ app.on("browser-window-created", (event, win) => {
             fs.writeFileSync("/tmp/nomad-ready.png", (await win.webContents.capturePage()).toPNG());
             startup.entryToInteractiveMs = Date.now() - startup.entryRequested;
             if (testPolish) fs.writeFileSync("/tmp/nomad-v068/startup.json", JSON.stringify(startup, null, 2));
+            if (performanceLabel) {
+                await require("./performance.gui.js").measure(win, read, performanceLabel, startup);
+                return;
+            }
             if (process.argv.includes("--layout-only")) {
                 await polishGui.matrix(win, read, false);
                 return;

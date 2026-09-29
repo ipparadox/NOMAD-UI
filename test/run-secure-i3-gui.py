@@ -10,6 +10,7 @@ import argparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--polish", action="store_true")
+parser.add_argument("--performance", choices=["before", "after"])
 parser.add_argument("--layout-only", action="store_true")
 parser.add_argument("--soak-seconds", type=int, default=0)
 options = parser.parse_args()
@@ -58,6 +59,7 @@ with tempfile.TemporaryDirectory(prefix="nomad-i3-gui-") as temporary:
         print("Private authenticated Xwayland/i3 session ready", flush=True)
         result = subprocess.run([str(root / "node_modules/.bin/electron"),
                                  "test/secureProduction.gui.js", "--nointro", "--test-i3"]
+                                + ([f"--performance={options.performance}"] if options.performance else [])
                                 + (["--polish", f"--soak-seconds={min(1800, max(10, options.soak_seconds))}"] if options.polish else []) + (["--layout-only"] if options.layout_only else []),
                                 cwd=root, env=environment, timeout=300 + min(1800, max(0, max(options.soak_seconds, int(os.environ.get("NOMAD_GUI_SOAK_SECONDS", "0"))))))
         raise SystemExit(result.returncode)

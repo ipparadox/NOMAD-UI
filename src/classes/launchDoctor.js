@@ -3,7 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const net = require("net");
 const {RepairRuleRegistry} = require("./repairRuleRegistry.js");
-const {readInputs, inspectProject} = require("./projectAdapters.js");
+const {readInputs, inspectProjectInputs} = require("./projectAdapters.js");
 const {ProjectRuntimeResolver} = require("./projectRuntimeResolver.js");
 const {resolveTrustedExecutable} = require("./repositoryProcessManager.js");
 function dependencyState(repository, inputs) {
@@ -34,7 +34,7 @@ class LaunchDoctor {
     async preflight(repository, candidate, automation) {
         const started = Date.now();
         const inputs = readInputs(repository);
-        const project = inspectProject(repository);
+        const project = inspectProjectInputs(repository, inputs);
         const facts = {candidate, type: project.type, blocked: project.blocked};
         let runtime = null;
         let profile = candidate;

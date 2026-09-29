@@ -80,7 +80,7 @@ class Clock extends Date { constructor(...args) { super(...(args.length ? args :
 const intervals = new Map(); const timeouts = new Map(); const frames = new Map(); let timerId = 0;
 class Series { constructor() { this.data = []; } append(time, value) { this.data.push([time, value]); } }
 class Chart {
-    constructor() { this.series = []; } addTimeSeries(series) { this.series.push(series); }
+    constructor(options) { this.options = options; this.series = []; } addTimeSeries(series) { this.series.push(series); }
     streamTo(canvas) { assert(canvas); this.canvas = canvas; this.start(); } start() { this.running = true; } stop() { this.running = false; }
 }
 class Globe {
@@ -128,6 +128,17 @@ async function run() {
     const [id, tick] = frames.entries().next().value; frames.delete(id); tick(1000);
     assert.strictEqual(dashboard.network.globe.globe.ticks, 1);
     assert.strictEqual(frames.size, 1, "one globe loop only");
+    dashboard.visualCadence.reset();
+    dashboard.visualCadence.observe(0);
+    for (let time=50; time<=5000; time+=50) dashboard.visualCadence.observe(time);
+    assert.strictEqual(dashboard.network.globe.paintInterval, 50);
+    assert(dashboard.system.cpuCharts.every(chart => chart.options.limitFPS === 12));
+    assert.strictEqual(intervals.size, 2, "adaptive quality owns no additional timer");
+    assert.strictEqual(frames.size, 1, "adaptive quality shares the globe loop");
+    const functionalSamples = dashboard.system.cpuSeries[0].data.length;
+    systemUpdate({...system, sequence: 3, timestamp: ++now});
+    assert.strictEqual(dashboard.system.cpuSeries[0].data.length, functionalSamples+1, "adaptive quality never drops functional samples");
+    dashboard.system.lastSequence = 2;
     now += 11000; dashboard.checkFreshness();
     assert.strictEqual(dashboard.system.statusElement.textContent, "SYSTEM TELEMETRY UNAVAILABLE");
     assert(dashboard.system.cpuCharts.every(chart => !chart.running));
@@ -165,6 +176,7 @@ async function run() {
     assert(dashboard.system.cpuSeries.every(series => series.data.length <= 600), "buffers stay bounded without chart paints");
     dashboard.dispose();
     dashboard.dispose();
+    assert.strictEqual(globe.onFrame, null, "cadence callback released");
     assert(!document.listeners.visibilitychange, "visibility listener removed");
     await new Promise(resolve => setImmediate(resolve));
     assert.strictEqual(timeouts.size, 0, "panel and settled recovery timers cleared");

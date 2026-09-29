@@ -56,6 +56,36 @@ function nomadAppendSample(series, time, value) {
     if (series.data.length > 600) series.data.splice(0, series.data.length - 600);
 }
 
+// Observe the existing globe RAF; this controller owns no timers or collectors.
+// Only decorative paint cadence changes. Samples and security state stay live.
+class NomadVisualCadence {
+    constructor(change) { this.change = change; this.reduced = false; this.reset(); }
+    reset() { this.start = null; this.frames = 0; this.recoverySince = null; }
+    observe(timestamp) {
+        if (this.start === null) { this.start = timestamp; return; }
+        this.frames++;
+        const elapsed = timestamp - this.start;
+        if (elapsed < 5000) return;
+        const fps = this.frames * 1000 / elapsed;
+        this.start = timestamp;
+        this.frames = 0;
+        if (!this.reduced && fps < 45) {
+            this.reduced = true;
+            this.recoverySince = null;
+            this.change(true);
+        } else if (this.reduced) {
+            if (fps >= 55) {
+                if (this.recoverySince === null) this.recoverySince = timestamp;
+                if (timestamp - this.recoverySince >= 30000) {
+                    this.reduced = false;
+                    this.recoverySince = null;
+                    this.change(false);
+                }
+            } else this.recoverySince = null;
+        }
+    }
+}
+
 class SecureClock {
     constructor(parent) {
         this.parent = parent;
@@ -275,7 +305,7 @@ class SecureSystemTelemetry {
         nomadSetText("mod_cpuinfo_range_end_1", count);
         for (let index = 0; index < 2; index++) {
             const chart = new window.SmoothieChart({
-                limitFPS: 30,
+                limitFPS: this.paintFPS || 30,
                 responsive: true,
                 millisPerPixel: 50,
                 grid: {fillStyle: "transparent", strokeStyle: "transparent", verticalSections: 0, borderVisible: false},
@@ -673,7 +703,8 @@ class SecureLocationGlobe {
     _startAnimation() {
         if (this.frame || this.disposed || this.visible === false) return;
         const tick = timestamp => {
-            if (!document.hidden && timestamp - this.lastTick >= 33 && this.globe) {
+            if (this.onFrame) this.onFrame(timestamp);
+            if (!document.hidden && timestamp - this.lastTick >= (this.paintInterval || 33) && this.globe) {
                 try { this.globe.tick(); }
                 catch (error) {
                     this._unavailable("GLOBE ANIMATION UNAVAILABLE");
@@ -812,7 +843,7 @@ class SecureNetworkTelemetry {
     _initializeCharts() {
         if (typeof window.TimeSeries !== "function" || typeof window.SmoothieChart !== "function") return;
         const base = {
-            limitFPS: 30,
+            limitFPS: this.paintFPS || 30,
             responsive: true,
             millisPerPixel: 70,
             interpolation: "linear",
@@ -911,6 +942,19 @@ class SecureTelemetryDashboard {
             theme: this.theme,
             log: this.log
         }));
+        this.visualCadence = new NomadVisualCadence(reduced => {
+            if (this.disposed) return;
+            const globe = this.network && this.network.globe;
+            if (globe) globe.paintInterval = reduced ? 50 : 33;
+            [this.system, this.network].forEach(view => {
+                if (!view) return;
+                view.paintFPS = reduced ? 12 : 30;
+                (view.cpuCharts || view.trafficCharts || []).forEach(chart => {
+                    chart.options.limitFPS = view.paintFPS;
+                });
+            });
+        });
+        if (this.network && this.network.globe) this.network.globe.onFrame = time => this.visualCadence.observe(time);
         this.activatePanels();
         const [system, network] = await Promise.all([systemReady, networkReady]);
         if (this.disposed) return {system, network};
@@ -937,6 +981,8 @@ class SecureTelemetryDashboard {
     checkFreshness() {
         if (this.disposed) return;
         const visible = !document.hidden && !document.body.classList.contains("nomad-login-active");
+        if (this.visualCadence && this.panelsVisible !== visible) this.visualCadence.reset();
+        this.panelsVisible = visible;
         if (this.network && this.network.globe) this.network.globe.setVisible(visible);
         [this.system, this.network].forEach(view => {
             if (!view) return;
@@ -986,6 +1032,7 @@ class SecureTelemetryDashboard {
             (view.cpuCharts || view.trafficCharts || []).forEach(chart => chart.stop());
         });
         if (this.network && this.network.globe) {
+            this.network.globe.onFrame = null;
             this.network.globe.dispose();
         }
     }
